@@ -127,8 +127,6 @@ export function FilterPanel() {
     isoMax ||
     dateStart ||
     dateEnd
-    dateStart ||
-    dateEnd
 
   return (
     <div className="border-b border-border">

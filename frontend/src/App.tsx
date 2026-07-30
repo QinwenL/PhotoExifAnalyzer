@@ -81,7 +81,7 @@ function App() {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [selectedImages.size, selectedDetailImage, filteredResults, deleteSelectedImages, setSelectedDetailImage])
+  }, [selectedImages, selectedDetailImage, filteredResults, deleteSelectedImages, setSelectedDetailImage])
 
   // Apply theme on mount
   useEffect(() => {
