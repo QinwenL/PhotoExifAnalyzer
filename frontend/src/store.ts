@@ -114,6 +114,20 @@ export interface ScanProgressPayload {
   percentage: number
 }
 
+// P3.4: scan warning emitted when the directory walk skips an entry
+// (e.g., permission-denied subdirectory). Mirrors `ScanWarning` /
+// `ScanWarningKind` in `src-tauri/src/exif/scanner.rs`.
+//
+// design.md "错误处理策略":
+//   | 权限错误 | 跳过文件夹 | "无法访问 XXX" |
+export type ScanWarningKind = 'PermissionDenied' | 'Other'
+
+export interface ScanWarning {
+  path: string
+  message: string
+  kind: ScanWarningKind
+}
+
 // App state
 interface AppState {
   // Directory
@@ -135,6 +149,14 @@ interface AppState {
   cacheWarning: string | null
   clearCacheWarning: () => void
   queryCacheStatus: () => Promise<void>
+
+  /**
+   * P3.4: 扫描期间由后端 `scan_warning` 事件上报的目录访问错误
+   * （例如权限不足的子目录）。每次扫描开始时清空。
+   * UI 显示 "无法访问 XXX" 列表让用户知道有文件夹被跳过。
+   */
+  scanWarnings: ScanWarning[]
+  clearScanWarnings: () => void
 
   // Data
   scanResults: ScanResult[]
@@ -233,6 +255,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       // 命令不存在或调用失败时不阻塞应用启动
     }
   },
+  // P3.4: 扫描警告列表，由 scan_warning 事件追加；新扫描开始时清空。
+  scanWarnings: [],
+  clearScanWarnings: () => set({ scanWarnings: [] }),
   scanResults: [],
   filteredResults: [],
   cameraStats: null,
@@ -268,7 +293,15 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   scanDirectoryWithProgress: async (dir, recursive) => {
-    set({ isScanning: true, scanProgress: 0, scanProcessed: null, scanTotal: null })
+    set({
+      isScanning: true,
+      scanProgress: 0,
+      scanProcessed: null,
+      scanTotal: null,
+      // P3.4: clear any warnings collected during a previous scan so the
+      // UI doesn't show stale "无法访问 XXX" entries from another folder.
+      scanWarnings: [],
+    })
     // Same rationale as scanDirectory (see comment above): rotate the
     // thumbnail epoch so stale-skeleton tiles re-fire their load effect
     // and in-flight completes from the cancelled previous batch are
@@ -284,8 +317,20 @@ export const useAppStore = create<AppState>((set, get) => ({
         })
       })
 
+      // P3.4: collect scan_warning events emitted by the backend when
+      // walkdir skips a subdirectory (e.g., permission denied). Each
+      // warning is appended to scanWarnings so the UI can surface
+      // "无法访问 XXX" notifications per design.md.
+      const warningHandler = listen('scan_warning', (event) => {
+        const warning = event.payload as ScanWarning
+        if (warning && typeof warning === 'object' && typeof warning.path === 'string') {
+          set((state) => ({ scanWarnings: [...state.scanWarnings, warning] }))
+        }
+      })
+
       const results: ScanResult[] = await invoke('scan_images_with_progress', { dir, recursive })
       await progressHandler
+      await warningHandler
       set({
         scanResults: results,
         filteredResults: results,

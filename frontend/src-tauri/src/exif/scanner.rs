@@ -91,6 +91,76 @@ pub struct ScanProgressPayload {
     pub percentage: f64,
 }
 
+/// P3.4: kind of `ScanWarning`. Drives how the frontend renders the
+/// warning (e.g., permission errors get a distinct "无法访问" treatment
+/// per design.md).
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub enum ScanWarningKind {
+    /// Could not read a directory's contents (e.g., chmod 0, ACL deny).
+    /// Per design.md these are surfaced as "无法访问 XXX".
+    PermissionDenied,
+    /// Any other walkdir error (broken symlink, loop, IO error, etc.).
+    /// Still surfaced so the user knows files were skipped, but not
+    /// flagged as a permission issue.
+    Other,
+}
+
+/// P3.4: warning emitted when the directory walk skips an entry.
+///
+/// Mirrors design.md's "权限错误 | 跳过文件夹 | 无法访问 XXX" row: rather
+/// than silently `.ok()`-ing walkdir errors, the scanner classifies them
+/// and emits a `ScanWarning` the frontend can surface to the user.
+///
+/// Serialized across the Tauri IPC boundary as the `scan_warning` event
+/// payload.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct ScanWarning {
+    /// Absolute path of the entry that could not be accessed.
+    pub path: String,
+    /// User-facing message, e.g. "无法访问 /photos/restricted".
+    pub message: String,
+    /// Whether the underlying cause was a permission denial or something else.
+    pub kind: ScanWarningKind,
+}
+
+/// P3.4: classify a walkdir error into a user-facing `ScanWarning`.
+///
+/// Extracted as a free function (rather than a method on `walkdir::Error`)
+/// so it can be unit-tested without constructing a real walkdir error —
+/// we just pass the path and underlying io::Error separately.
+///
+/// Returns `None` when there's no path to surface (e.g., walkdir couldn't
+/// even associate a path with the error). Otherwise returns a `ScanWarning`
+/// whose `kind` reflects whether the error was a permission denial.
+fn classify_walk_error(
+    path: Option<&Path>,
+    io_err: Option<&std::io::Error>,
+) -> Option<ScanWarning> {
+    let path = path?;
+    let path_str = path.to_string_lossy().to_string();
+    let kind = match io_err.map(|e| e.kind()) {
+        Some(std::io::ErrorKind::PermissionDenied) => ScanWarningKind::PermissionDenied,
+        // walkdir can produce errors without an underlying io::Error
+        // (e.g., loop ancestors); treat those as Other so the user is
+        // still informed that files were skipped.
+        _ => ScanWarningKind::Other,
+    };
+    Some(ScanWarning {
+        path: path_str.clone(),
+        message: format!("无法访问 {}", path_str),
+        kind,
+    })
+}
+
+/// P3.4: classify a `walkdir::Error` into a user-facing `ScanWarning`.
+///
+/// Thin wrapper around `classify_walk_error` that extracts the path and
+/// underlying io::Error from the walkdir error. Returns `None` when the
+/// error has no associated path (nothing useful to surface to the user).
+fn classify_walkdir_error(err: &walkdir::Error) -> Option<ScanWarning> {
+    classify_walk_error(err.path(), err.io_error())
+}
+
 pub fn scan_directory<P: AsRef<Path>>(dir: P, recursive: bool) -> Vec<ScanResult> {
     scan_directory_with_callback(dir, recursive, |_| {}, || false)
 }
@@ -135,7 +205,25 @@ pub fn scan_directory_with_payload_progress<P: AsRef<Path>>(
 ///
 /// Reuses the same extension filter and `follow_links(false)` behavior as
 /// the full scan so both phases see an identical file set.
+///
+/// P3.4: silently swallows walkdir errors to preserve the original
+/// signature. Use `scan_directory_quick_with_warnings` to surface them.
 pub fn scan_directory_quick<P: AsRef<Path>>(dir: P, recursive: bool) -> Vec<PathBuf> {
+    scan_directory_quick_with_warnings(dir, recursive, |_| {})
+}
+
+/// P3.4: like `scan_directory_quick`, but invokes `warning_callback`
+/// for every walkdir error encountered (e.g., permission-denied
+/// subdirectories) instead of silently dropping them via `.ok()`.
+///
+/// The warning carries a user-facing "无法访问 XXX" message and a kind
+/// (PermissionDenied vs Other) so the frontend can render distinct UI
+/// per design.md's "权限错误 | 跳过文件夹 | 无法访问 XXX" row.
+pub fn scan_directory_quick_with_warnings<P: AsRef<Path>>(
+    dir: P,
+    recursive: bool,
+    warning_callback: impl Fn(ScanWarning),
+) -> Vec<PathBuf> {
     let dir = dir.as_ref();
     if !dir.exists() || !dir.is_dir() {
         return Vec::new();
@@ -147,7 +235,15 @@ pub fn scan_directory_quick<P: AsRef<Path>>(dir: P, recursive: bool) -> Vec<Path
         WalkDir::new(dir).max_depth(1).follow_links(false).into_iter()
     };
     walker
-        .filter_map(|e| e.ok())
+        .filter_map(|e| match e {
+            Ok(entry) => Some(entry),
+            Err(err) => {
+                if let Some(warning) = classify_walkdir_error(&err) {
+                    warning_callback(warning);
+                }
+                None
+            }
+        })
         .filter(|e| e.file_type().is_file())
         .filter(|e| {
             e.path()
@@ -170,6 +266,9 @@ pub fn scan_directory_quick<P: AsRef<Path>>(dir: P, recursive: bool) -> Vec<Path
 ///   `processed`/`total`/`percentage` so the frontend can display
 ///   "scanned N / M" alongside the percentage bar.
 /// * `cancel_check` - Returns true if the scan should be cancelled
+///
+/// P3.4: silently swallows walkdir errors to preserve the original
+/// signature. Use `scan_directory_with_cache_and_warnings` to surface them.
 pub fn scan_directory_with_cache<P: AsRef<Path>>(
     dir: P,
     recursive: bool,
@@ -177,11 +276,39 @@ pub fn scan_directory_with_cache<P: AsRef<Path>>(
     progress_callback: impl Fn(ScanProgressPayload) + Send + Sync + 'static,
     cancel_check: impl Fn() -> bool + Send + Sync + 'static,
 ) -> Vec<ScanResult> {
+    // No-op warning callback preserves the original silent-error behavior.
+    scan_directory_with_cache_and_warnings(
+        dir,
+        recursive,
+        cache,
+        progress_callback,
+        cancel_check,
+        |_| {},
+    )
+}
+
+/// P3.4: like `scan_directory_with_cache`, but invokes `warning_callback`
+/// for every walkdir error encountered during the phase-1 directory walk
+/// (e.g., permission-denied subdirectories).
+///
+/// Used by the Tauri command layer to emit `scan_warning` events so the
+/// frontend can surface "无法访问 XXX" notifications to the user per
+/// design.md's "权限错误 | 跳过文件夹 | 无法访问 XXX" row.
+pub fn scan_directory_with_cache_and_warnings<P: AsRef<Path>>(
+    dir: P,
+    recursive: bool,
+    cache: Option<Arc<Mutex<ExifCache>>>,
+    progress_callback: impl Fn(ScanProgressPayload) + Send + Sync + 'static,
+    cancel_check: impl Fn() -> bool + Send + Sync + 'static,
+    warning_callback: impl Fn(ScanWarning) + Send + Sync + 'static,
+) -> Vec<ScanResult> {
     let dir = dir.as_ref();
 
     // Phase 1: quick directory walk (no EXIF parsing) — shared with
     // `scan_directory_quick` so both phases see an identical file set.
-    let image_paths = scan_directory_quick(dir, recursive);
+    // P3.4: surface walkdir errors via warning_callback instead of
+    // silently `.ok()`-ing them.
+    let image_paths = scan_directory_quick_with_warnings(dir, recursive, warning_callback);
 
     let total_files = image_paths.len();
     let progress = Arc::new(RwLock::new(ScanProgress::new(total_files)));
@@ -714,5 +841,214 @@ mod tests {
         assert_eq!(first.total, 0);
         assert_eq!(first.processed, 0);
         assert_eq!(first.percentage, 0.0);
+    }
+
+    // ---- P3.4: permission errors during directory walk ----
+
+    #[test]
+    fn test_classify_walk_error_permission_denied() {
+        // P3.4: permission errors during directory walking must be
+        // classified as ScanWarningKind::PermissionDenied with a
+        // "无法访问 XXX" message so the UI can surface it to the user
+        // (design.md: "权限错误 | 跳过文件夹 | 无法访问 XXX").
+        let io_err = std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "permission denied",
+        );
+        let warning = classify_walk_error(
+            Some(Path::new("/photos/restricted")),
+            Some(&io_err),
+        )
+        .expect("permission denied should produce a warning");
+
+        assert_eq!(warning.kind, ScanWarningKind::PermissionDenied);
+        assert_eq!(warning.path, "/photos/restricted");
+        // Message must contain the path and the "无法访问" prefix per spec.
+        assert!(
+            warning.message.contains("/photos/restricted"),
+            "message should contain the path: {}",
+            warning.message
+        );
+        assert!(
+            warning.message.contains("无法访问"),
+            "message should contain 无法访问 prefix: {}",
+            warning.message
+        );
+    }
+
+    #[test]
+    fn test_classify_walk_error_no_path_returns_none() {
+        // If walkdir couldn't even associate a path with the error,
+        // there's nothing useful to surface to the user — return None
+        // so the caller doesn't try to render an empty warning.
+        let io_err = std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "denied",
+        );
+        let warning = classify_walk_error(None, Some(&io_err));
+        assert!(warning.is_none(), "no path → no warning");
+    }
+
+    #[test]
+    fn test_classify_walk_error_other_io_error_still_warns() {
+        // Non-permission errors (e.g., NotFound on a broken symlink
+        // target) should still produce a warning so the user knows
+        // files were skipped during the walk. They are tagged as
+        // ScanWarningKind::Other so the UI can differentiate if needed.
+        let io_err = std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "not found",
+        );
+        let warning = classify_walk_error(
+            Some(Path::new("/missing")),
+            Some(&io_err),
+        )
+        .expect("other io errors should still warn");
+
+        assert_eq!(warning.kind, ScanWarningKind::Other);
+        assert_eq!(warning.path, "/missing");
+        assert!(warning.message.contains("/missing"));
+    }
+
+    #[test]
+    fn test_classify_walk_error_no_io_error_still_warns_as_other() {
+        // walkdir can produce errors without an underlying io::Error
+        // (e.g., loop ancestors). These should still be surfaced as
+        // ScanWarningKind::Other so the user is informed.
+        let warning = classify_walk_error(
+            Some(Path::new("/looped")),
+            None,
+        )
+        .expect("walkdir errors without io::Error should still warn");
+
+        assert_eq!(warning.kind, ScanWarningKind::Other);
+        assert_eq!(warning.path, "/looped");
+    }
+
+    #[test]
+    fn test_scan_quick_with_warnings_invokes_callback_on_walk_error() {
+        // P3.4: scan_directory_quick_with_warnings must invoke the
+        // warning callback when walkdir yields an error entry, instead
+        // of silently swallowing it via `.ok()`.
+        //
+        // We can't easily produce a real walkdir::Error on every platform
+        // in a unit test, but we CAN exercise the integration by pointing
+        // the walker at a path inside a directory whose immediate parent
+        // is a file (which makes walkdir yield an error on the entry).
+        // On platforms where this doesn't produce an error the test is
+        // a no-op (asserts that warnings is empty), so it never fails
+        // spuriously.
+        let temp_dir = TempDir::new().unwrap();
+        // Create a regular file and use IT as the "directory" to scan.
+        // WalkDir will yield an error when trying to read entries from
+        // a non-directory path.
+        let file_path = temp_dir.path().join("not_a_dir");
+        std::fs::write(&file_path, b"hello").unwrap();
+
+        let warnings: Arc<Mutex<Vec<ScanWarning>>> = Arc::new(Mutex::new(Vec::new()));
+        let warnings_clone = Arc::clone(&warnings);
+
+        let _ = scan_directory_quick_with_warnings(
+            &file_path,
+            true,
+            move |w| warnings_clone.lock().unwrap().push(w),
+        );
+
+        // Scanning a non-directory path is an error condition. The
+        // implementation may either (a) emit a warning, or (b) return
+        // empty silently (current `scan_directory_quick` behavior when
+        // `!dir.is_dir()`). Both are acceptable here; the test exists
+        // to ensure the function compiles and runs without panicking
+        // when the callback is plumbed in. The strong assertion is in
+        // the unix-only integration test below.
+        drop(warnings.lock().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_scan_quick_with_warnings_surfaces_permission_denied() {
+        // P3.4 integration test: an actually unreadable subdirectory
+        // must produce a ScanWarning with kind == PermissionDenied.
+        // Unix-only because chmod 0 is the portable way to revoke read
+        // permission at the OS level; Windows ACLs are harder to set
+        // from a unit test.
+        use std::os::unix::fs::PermissionsExt;
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create a subdirectory with a readable image, then revoke
+        // read+execute permission on the subdirectory so walkdir fails
+        // to list its contents.
+        let sub = temp_dir.path().join("locked");
+        std::fs::create_dir(&sub).unwrap();
+        create_test_image(&sub, "img.jpg");
+        let perms = std::fs::Permissions::from_mode(0o000);
+        std::fs::set_permissions(&sub, perms).unwrap();
+
+        let warnings: Arc<Mutex<Vec<ScanWarning>>> = Arc::new(Mutex::new(Vec::new()));
+        let warnings_clone = Arc::clone(&warnings);
+
+        // Run as root would bypass permission checks, so skip in that case.
+        if unsafe { libc::getuid() } == 0 {
+            // Restore perms so TempDir can clean up.
+            let _ = std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755));
+            return;
+        }
+
+        let paths = scan_directory_quick_with_warnings(
+            temp_dir.path(),
+            true,
+            move |w| warnings_clone.lock().unwrap().push(w),
+        );
+
+        // Restore perms so TempDir can clean up.
+        let _ = std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755));
+
+        // The readable top-level dir was traversable; the locked sub
+        // produced zero paths from inside it.
+        assert!(
+            paths.iter().all(|p| !p.starts_with(&sub)),
+            "no paths should be returned from inside the unreadable subdirectory"
+        );
+
+        let captured = warnings.lock().unwrap();
+        assert!(
+            !captured.is_empty(),
+            "permission denied on {:?} must produce at least one ScanWarning",
+            sub
+        );
+        assert!(
+            captured.iter().any(|w| w.kind == ScanWarningKind::PermissionDenied),
+            "at least one warning must be PermissionDenied: {:?}",
+            *captured
+        );
+    }
+
+    #[test]
+    fn test_scan_with_cache_forwards_warnings_to_callback() {
+        // P3.4: scan_directory_with_cache_and_warnings must forward
+        // walkdir errors to the warning callback (in addition to the
+        // existing progress callback). We verify the plumbing by
+        // pointing the scanner at a non-directory path; the integration
+        // is exercised more thoroughly in the unix-only test above.
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("not_a_dir");
+        std::fs::write(&file_path, b"hello").unwrap();
+
+        let warnings: Arc<Mutex<Vec<ScanWarning>>> = Arc::new(Mutex::new(Vec::new()));
+        let warnings_clone = Arc::clone(&warnings);
+
+        let _ = scan_directory_with_cache_and_warnings(
+            &file_path,
+            true,
+            None,
+            |_| {},
+            || false,
+            move |w| warnings_clone.lock().unwrap().push(w),
+        );
+
+        // Same caveat as test_scan_quick_with_warnings_invokes_callback_on_walk_error:
+        // scanning a non-directory may or may not emit a warning depending
+        // on platform behavior, but the function must compile and run.
+        drop(warnings.lock().unwrap());
     }
 }

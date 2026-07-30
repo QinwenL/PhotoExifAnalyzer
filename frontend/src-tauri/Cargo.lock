@@ -2215,6 +2215,7 @@ dependencies = [
  "image",
  "kamadak-exif",
  "lazy_static",
+ "libc",
  "lru",
  "memchr",
  "memmap2",

@@ -58,6 +58,8 @@ function App() {
     cacheWarning,
     clearCacheWarning,
     queryCacheStatus,
+    scanWarnings,
+    clearScanWarnings,
     setSelectedDirectory,
     scanDirectoryWithProgress,
     cancelScan,
@@ -244,6 +246,36 @@ function App() {
           >
             ✕
           </Button>
+        </div>
+      )}
+
+      {/* P3.4: Scan warnings banner — list folders skipped during the walk */}
+      {scanWarnings.length > 0 && (
+        <div className="bg-amber-500/10 border-b border-amber-500/30 px-4 py-2">
+          <div className="flex items-center justify-between gap-4">
+            <p className="text-sm font-medium text-amber-700 dark:text-amber-400">
+              {scanWarnings.length} 个文件夹无法访问，已跳过
+            </p>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-amber-700 dark:text-amber-400 hover:bg-amber-500/20"
+              onClick={clearScanWarnings}
+            >
+              ✕
+            </Button>
+          </div>
+          <ul className="mt-1 space-y-0.5">
+            {scanWarnings.map((warning) => (
+              <li
+                key={warning.path}
+                className="text-xs text-amber-700 dark:text-amber-400 truncate"
+                title={warning.path}
+              >
+                {warning.message}
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 

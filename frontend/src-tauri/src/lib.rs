@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use exif::cache::ExifCache;
-use exif::scanner::{scan_directory_with_cache, ScanProgressPayload, ScanResult};
+use exif::scanner::{
+    scan_directory_with_cache_and_warnings, ScanProgressPayload, ScanResult, ScanWarning,
+};
 use exif::stats::{
     calculate_all_stats, calculate_camera_stats, calculate_focal_length_stats,
     calculate_lens_stats, filter_results, AllStats, CameraStats, FilterCriteria,
@@ -219,7 +221,12 @@ async fn scan_images_with_progress(
     // (and thus the webview event loop) stays responsive. Progress events
     // emitted from this thread can be delivered to the frontend immediately.
     let result = tauri::async_runtime::spawn_blocking(move || {
-        scan_directory_with_cache(
+        // P3.4: `window` is moved into BOTH the progress and warning
+        // closures below, so we clone it once for the warning callback.
+        // `Window` is `Clone` (it wraps an `Arc` internally) so this is
+        // cheap and shares the same underlying webview handle.
+        let warning_window = window.clone();
+        scan_directory_with_cache_and_warnings(
             &dir,
             recursive,
             cache,
@@ -231,6 +238,12 @@ async fn scan_images_with_progress(
                 let _ = window.emit("scan_progress", payload);
             }),
             move || *cancelled.lock().unwrap(),
+            // P3.4: surface walkdir errors (e.g., permission-denied
+            // subdirectories) to the frontend as `scan_warning` events so
+            // the UI can show "无法访问 XXX" notifications per design.md.
+            move |warning: ScanWarning| {
+                let _ = warning_window.emit("scan_warning", warning);
+            },
         )
     })
     .await
