@@ -20,6 +20,7 @@ function App() {
     selectedDetailImage,
     sortBy,
     sortOrder,
+    theme,
     setSelectedDirectory,
     scanDirectory,
     deleteSelectedImages,
@@ -29,6 +30,7 @@ function App() {
     setSelectedDetailImage,
     setSortBy,
     toggleSortOrder,
+    setTheme,
     exportToJSON,
   } = useAppStore()
 
@@ -72,7 +74,34 @@ function App() {
       <header className="border-b border-border p-4">
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-bold">PhotoExifAnalyzer</h1>
-          <div className="flex gap-2">
+          <div className="flex items-center gap-2">
+            {/* Theme toggle */}
+            <div className="flex gap-1 border border-border rounded p-1">
+              <Button
+                variant={theme === 'light' ? 'default' : 'ghost'}
+                size="sm"
+                className="text-xs"
+                onClick={() => setTheme('light')}
+              >
+                ☀️
+              </Button>
+              <Button
+                variant={theme === 'dark' ? 'default' : 'ghost'}
+                size="sm"
+                className="text-xs"
+                onClick={() => setTheme('dark')}
+              >
+                🌙
+              </Button>
+              <Button
+                variant={theme === 'system' ? 'default' : 'ghost'}
+                size="sm"
+                className="text-xs"
+                onClick={() => setTheme('system')}
+              >
+                💻
+              </Button>
+            </div>
             <Button onClick={handleSelectDirectory} disabled={isScanning}>
               {isScanning ? '扫描中...' : '选择文件夹'}
             </Button>

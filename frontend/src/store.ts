@@ -93,6 +93,7 @@ interface AppState {
   lastSelectedIndex: number | null
   sortBy: 'name' | 'date' | 'size' | 'camera'
   sortOrder: 'asc' | 'desc'
+  theme: 'light' | 'dark' | 'system'
 
   // Actions
   setSelectedDirectory: (dir: string | null) => void
@@ -108,6 +109,7 @@ interface AppState {
   setSelectedDetailImage: (result: ScanResult | null) => void
   setSortBy: (field: 'name' | 'date' | 'size' | 'camera') => void
   toggleSortOrder: () => void
+  setTheme: (theme: 'light' | 'dark' | 'system') => void
   exportToJSON: () => void
 }
 
@@ -128,6 +130,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   lastSelectedIndex: null,
   sortBy: 'name',
   sortOrder: 'asc',
+  theme: 'system',
 
   // Actions
   setSelectedDirectory: (dir) => set({ selectedDirectory: dir }),
@@ -236,6 +239,19 @@ export const useAppStore = create<AppState>((set, get) => ({
   setViewMode: (mode) => set({ viewMode: mode }),
 
   setSelectedDetailImage: (result) => set({ selectedDetailImage: result }),
+
+  setTheme: (theme) => {
+    set({ theme })
+    // Apply theme to document
+    const root = document.documentElement
+    root.classList.remove('light', 'dark')
+    if (theme === 'system') {
+      const systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches
+      root.classList.add(systemDark ? 'dark' : 'light')
+    } else {
+      root.classList.add(theme)
+    }
+  },
 
   setSortBy: (field) => {
     const { filteredResults, sortOrder } = get()
