@@ -106,7 +106,7 @@ pub fn calculate_camera_stats(results: &[ScanResult]) -> CameraStats {
         })
         .collect();
 
-    cameras.sort_by(|a, b| b.count.cmp(&a.count));
+    cameras.sort_by_key(|b| std::cmp::Reverse(b.count));
 
     CameraStats { cameras, total }
 }
@@ -135,7 +135,7 @@ pub fn calculate_lens_stats(results: &[ScanResult]) -> LensStats {
         })
         .collect();
 
-    lenses.sort_by(|a, b| b.count.cmp(&a.count));
+    lenses.sort_by_key(|b| std::cmp::Reverse(b.count));
 
     LensStats { lenses, total }
 }

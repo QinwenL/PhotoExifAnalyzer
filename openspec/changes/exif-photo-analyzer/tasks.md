@@ -24,12 +24,14 @@
 
 ## 3. Rust 后端 - RAW 格式支持（TDD）
 
-- [ ] 3.1 添加 `rawloader` 依赖
+- [x] 3.1 添加 `rawloader` 依赖
   - **验证**：`cargo build` 成功
-- [ ] 3.2 实现 RAW EXIF 解析
-  - **测试**：解析 CR2/NEF/ARW 文件
-- [ ] 3.3 处理不支持的 RAW 格式
-  - **测试**：返回错误信息
+  - **实际方案**：未引入 `rawloader`（它只解码像素，不提取 EXIF）。改为复用
+    `thumbnail.rs` 的 SOI/EOI 扫描逻辑 + `kamadak-exif` 读取内嵌 JPEG 预览的 EXIF。
+- [x] 3.2 实现 RAW EXIF 解析
+  - **测试**：解析 CR2/NEF/ARW 文件（路由 + 错误路径已覆盖；成功提取需真实 RAW 文件）
+- [x] 3.3 处理不支持的 RAW 格式
+  - **测试**：返回错误信息（无内嵌 JPEG / 预览过小）
 
 ## 4. Rust 后端 - 目录扫描（TDD）
 

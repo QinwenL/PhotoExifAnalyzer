@@ -142,7 +142,7 @@ fn extract_raw_preview(path: &Path) -> Result<image::DynamicImage, String> {
     Ok(img)
 }
 
-fn find_all_jpeg_soi(data: &[u8]) -> Vec<usize> {
+pub(crate) fn find_all_jpeg_soi(data: &[u8]) -> Vec<usize> {
     let mut positions = Vec::new();
     let mut search_pos = 0;
 
@@ -163,7 +163,7 @@ fn find_all_jpeg_soi(data: &[u8]) -> Vec<usize> {
     positions
 }
 
-fn find_jpeg_eoi(data: &[u8], from_pos: usize) -> Option<usize> {
+pub(crate) fn find_jpeg_eoi(data: &[u8], from_pos: usize) -> Option<usize> {
     if from_pos >= data.len().saturating_sub(1) {
         return None;
     }
@@ -258,7 +258,7 @@ fn get_image_jpeg_bytes(path: &Path, max_size: u32) -> Result<Vec<u8>, String> {
     // Defensive clamp at the function layer. The Tauri command layer also
     // clamps; the redundancy protects against future non-command callers
     // that might bypass the command layer (tests, other Rust modules).
-    let max_size = max_size.max(1).min(MAX_ALLOWED_THUMBNAIL_SIZE);
+    let max_size = max_size.clamp(1, MAX_ALLOWED_THUMBNAIL_SIZE);
     let img = if max_size <= THUMBNAIL_SIZE {
         if let Ok(thumb_path) = get_thumbnail_path(path) {
             if let Ok(thumb) = image::open(&thumb_path) {
@@ -803,8 +803,8 @@ mod tests {
         generate_thumbnail(&src, &dst).unwrap();
         assert!(dst.exists());
         let thumb = image::open(&dst).unwrap();
-        assert_eq!(thumb.width(), THUMBNAIL_SIZE as u32);
-        assert_eq!(thumb.height(), THUMBNAIL_SIZE as u32);
+        assert_eq!(thumb.width(), THUMBNAIL_SIZE);
+        assert_eq!(thumb.height(), THUMBNAIL_SIZE);
     }
 
     #[test]
@@ -815,8 +815,8 @@ mod tests {
         generate_thumbnail(&src, &dst).unwrap();
         assert!(dst.exists());
         let thumb = image::open(&dst).unwrap();
-        assert_eq!(thumb.width(), THUMBNAIL_SIZE as u32);
-        assert_eq!(thumb.height(), THUMBNAIL_SIZE as u32);
+        assert_eq!(thumb.width(), THUMBNAIL_SIZE);
+        assert_eq!(thumb.height(), THUMBNAIL_SIZE);
     }
 
     #[test]
@@ -827,8 +827,8 @@ mod tests {
         generate_thumbnail(&src, &dst).unwrap();
         assert!(dst.exists());
         let thumb = image::open(&dst).unwrap();
-        assert_eq!(thumb.width(), THUMBNAIL_SIZE as u32);
-        assert_eq!(thumb.height(), THUMBNAIL_SIZE as u32);
+        assert_eq!(thumb.width(), THUMBNAIL_SIZE);
+        assert_eq!(thumb.height(), THUMBNAIL_SIZE);
     }
 
     #[test]
@@ -839,8 +839,8 @@ mod tests {
         generate_thumbnail(&src, &dst).unwrap();
         assert!(dst.exists());
         let thumb = image::open(&dst).unwrap();
-        assert_eq!(thumb.width(), THUMBNAIL_SIZE as u32);
-        assert_eq!(thumb.height(), THUMBNAIL_SIZE as u32);
+        assert_eq!(thumb.width(), THUMBNAIL_SIZE);
+        assert_eq!(thumb.height(), THUMBNAIL_SIZE);
     }
 
     #[test]
@@ -967,7 +967,7 @@ mod tests {
         new_img.save(&src).unwrap();
         let thumb2 = get_thumbnail_path(&src).unwrap();
         let new_thumb = image::open(&thumb2).unwrap();
-        assert_eq!(new_thumb.width(), THUMBNAIL_SIZE as u32);
+        assert_eq!(new_thumb.width(), THUMBNAIL_SIZE);
     }
 
     #[test]
