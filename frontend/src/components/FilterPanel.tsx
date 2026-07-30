@@ -108,10 +108,6 @@ export function FilterPanel() {
     setDateStart('')
     setDateEnd('')
     setLocalCriteria({ and_mode: false })
-    setIsoMax('')
-    setDateStart('')
-    setDateEnd('')
-    setLocalCriteria({ and_mode: false })
     setFilterCriteria({ and_mode: false })
     applyFilter()
   }
