@@ -78,6 +78,38 @@ pub fn scan_directory_with_callback<P: AsRef<Path>>(
     scan_directory_with_cache(dir, recursive, None, progress_callback, cancel_check)
 }
 
+/// Phase 1 of two-phase scan: walk a directory and return image file paths
+/// WITHOUT parsing EXIF. Used to populate the UI file list fast (<1s for
+/// typical libraries) while EXIF parsing (phase 2) runs separately via
+/// `scan_directory_with_cache`.
+///
+/// Reuses the same extension filter and `follow_links(false)` behavior as
+/// the full scan so both phases see an identical file set.
+pub fn scan_directory_quick<P: AsRef<Path>>(dir: P, recursive: bool) -> Vec<PathBuf> {
+    let dir = dir.as_ref();
+    if !dir.exists() || !dir.is_dir() {
+        return Vec::new();
+    }
+    let extensions: HashSet<&str> = IMAGE_EXTENSIONS.iter().copied().collect();
+    let walker = if recursive {
+        WalkDir::new(dir).follow_links(false).into_iter()
+    } else {
+        WalkDir::new(dir).max_depth(1).follow_links(false).into_iter()
+    };
+    walker
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .filter(|e| {
+            e.path()
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| extensions.contains(ext.to_lowercase().as_str()))
+                .unwrap_or(false)
+        })
+        .map(|e| e.path().to_path_buf())
+        .collect()
+}
+
 /// Scan a directory for images with EXIF caching and I/O concurrency limiting.
 ///
 /// # Arguments
@@ -95,35 +127,9 @@ pub fn scan_directory_with_cache<P: AsRef<Path>>(
 ) -> Vec<ScanResult> {
     let dir = dir.as_ref();
 
-    if !dir.exists() || !dir.is_dir() {
-        return Vec::new();
-    }
-
-    let extensions: HashSet<&str> = IMAGE_EXTENSIONS.iter().copied().collect();
-
-    let walker = if recursive {
-        WalkDir::new(dir)
-            .follow_links(false)
-            .into_iter()
-    } else {
-        WalkDir::new(dir)
-            .max_depth(1)
-            .follow_links(false)
-            .into_iter()
-    };
-
-    let image_paths: Vec<PathBuf> = walker
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .map(|ext| extensions.contains(ext.to_lowercase().as_str()))
-                .unwrap_or(false)
-        })
-        .map(|e| e.path().to_path_buf())
-        .collect();
+    // Phase 1: quick directory walk (no EXIF parsing) — shared with
+    // `scan_directory_quick` so both phases see an identical file set.
+    let image_paths = scan_directory_quick(dir, recursive);
 
     let total_files = image_paths.len();
     let progress = Arc::new(RwLock::new(ScanProgress::new(total_files)));
@@ -456,5 +462,64 @@ mod tests {
         );
 
         assert!(results.is_empty());
+    }
+
+    // ---- Two-phase scan (task 4.7) ----
+
+    #[test]
+    fn test_quick_scan_returns_paths_without_parsing() {
+        let temp_dir = TempDir::new().unwrap();
+        create_test_image(temp_dir.path(), "a.jpg");
+        create_test_image(temp_dir.path(), "b.jpg");
+        std::fs::write(temp_dir.path().join("note.txt"), b"not an image").unwrap();
+
+        let paths = scan_directory_quick(temp_dir.path(), true);
+        assert_eq!(paths.len(), 2, "only image files should be returned");
+        assert!(
+            paths.iter().all(|p| p.extension().is_some()),
+            "all returned paths must have an extension"
+        );
+    }
+
+    #[test]
+    fn test_quick_scan_respects_recursive_flag() {
+        let temp_dir = TempDir::new().unwrap();
+        create_test_image(temp_dir.path(), "top.jpg");
+        let sub = temp_dir.path().join("sub");
+        fs::create_dir(&sub).unwrap();
+        create_test_image(&sub, "nested.jpg");
+
+        let flat = scan_directory_quick(temp_dir.path(), false);
+        assert_eq!(flat.len(), 1);
+
+        let deep = scan_directory_quick(temp_dir.path(), true);
+        assert_eq!(deep.len(), 2);
+    }
+
+    #[test]
+    fn test_quick_scan_is_fast_under_one_second() {
+        // Task 4.7 requirement: quick scan returns file list in <1s.
+        // 100 files is enough to surface a regression without making the
+        // test slow on CI.
+        let temp_dir = TempDir::new().unwrap();
+        for i in 0..100 {
+            create_test_image(temp_dir.path(), &format!("img{i:03}.jpg"));
+        }
+
+        let start = std::time::Instant::now();
+        let paths = scan_directory_quick(temp_dir.path(), true);
+        let elapsed = start.elapsed();
+
+        assert_eq!(paths.len(), 100);
+        assert!(
+            elapsed.as_millis() < 1000,
+            "quick scan must be <1s, took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn test_quick_scan_nonexistent_dir_returns_empty() {
+        let paths = scan_directory_quick("/nonexistent/path", true);
+        assert!(paths.is_empty());
     }
 }
