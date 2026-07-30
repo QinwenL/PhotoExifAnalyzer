@@ -313,6 +313,78 @@ pub fn clear_thumbnails(dir: &Path) -> Result<usize, String> {
     Ok(count)
 }
 
+use std::num::NonZeroUsize;
+
+const MEMORY_CACHE_CAPACITY: usize = 64;
+
+lazy_static::lazy_static! {
+    static ref IMAGE_DATA_CACHE: std::sync::Mutex<lru::LruCache<(std::path::PathBuf, u32), String>> =
+        std::sync::Mutex::new(lru::LruCache::new(
+            NonZeroUsize::new(MEMORY_CACHE_CAPACITY).unwrap()
+        ));
+}
+
+pub(crate) fn get_data_cache_path(
+    path: &std::path::Path,
+    max_size: u32,
+) -> Result<std::path::PathBuf, String> {
+    let dir = get_thumbnail_dir(path)?;
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| format!("Invalid filename: {}", path.display()))?;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    let hash = hasher.finish();
+    Ok(dir.join(format!("{stem}_{hash}_{max_size}.jpg")))
+}
+
+pub fn get_image_base64_cached(
+    path: &std::path::Path,
+    max_size: u32,
+) -> Result<String, String> {
+    let key = (path.to_path_buf(), max_size);
+    if let Some(data) = IMAGE_DATA_CACHE.lock().unwrap().get(&key).cloned() {
+        return Ok(data);
+    }
+    if let Ok(disk_path) = get_data_cache_path(path, max_size) {
+        if disk_path.exists() {
+            match std::fs::read(&disk_path) {
+                Ok(bytes) if bytes.starts_with(&[0xFF, 0xD8]) => {
+                    use base64::Engine;
+                    let data = format!(
+                        "data:image/jpeg;base64,{}",
+                        base64::engine::general_purpose::STANDARD.encode(&bytes)
+                    );
+                    IMAGE_DATA_CACHE.lock().unwrap().put(key.clone(), data.clone());
+                    return Ok(data);
+                }
+                Ok(_) => {
+                    let _ = std::fs::remove_file(&disk_path);
+                }
+                Err(_) => {
+                    let _ = std::fs::remove_file(&disk_path);
+                }
+            }
+        }
+    }
+    let data = get_image_base64(path, max_size)?;
+    const B64_PREFIX: &str = "data:image/jpeg;base64,";
+    if let Some(b64) = data.strip_prefix(B64_PREFIX) {
+        use base64::Engine;
+        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64) {
+            if let Ok(disk_path) = get_data_cache_path(path, max_size) {
+                let _ = get_thumbnail_dir(path);
+                let _ = std::fs::write(&disk_path, &bytes);
+            }
+        }
+    }
+    IMAGE_DATA_CACHE.lock().unwrap().put(key, data.clone());
+    Ok(data)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,6 +468,58 @@ mod tests {
         let count = clear_thumbnails(temp_dir.path()).unwrap();
         assert_eq!(count, 2);
         assert!(!thumb_dir.join("thumb1.jpg").exists());
+    }
+
+    #[test]
+    fn test_get_data_cache_path_has_size_suffix() {
+        let temp_dir = TempDir::new().unwrap();
+        let photo_dir = temp_dir.path().join("photos").join("2024");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        let image_path = photo_dir.join("img_001.jpg");
+        let path = Path::new(&image_path);
+        let p = get_data_cache_path(path, 200).unwrap();
+        let file_name = p.file_name().unwrap().to_str().unwrap();
+        assert!(file_name.contains("img_001_"));
+        assert!(file_name.ends_with("_200.jpg"));
+        assert!(p.parent().unwrap().ends_with(".thumbnails"));
+    }
+
+    #[test]
+    fn test_cached_decode_is_consistent() {
+        let temp_dir = TempDir::new().unwrap();
+        let image_path = create_test_jpeg(temp_dir.path(), "cached.jpg");
+        let data1 = get_image_base64_cached(&image_path, 100).unwrap();
+        assert!(data1.starts_with("data:image/jpeg;base64,"));
+        let data2 = get_image_base64_cached(&image_path, 100).unwrap();
+        assert_eq!(data1, data2);
+        let disk = get_data_cache_path(&image_path, 100).unwrap();
+        assert!(disk.exists());
+    }
+
+    #[test]
+    fn test_cached_decode_respects_max_size() {
+        let temp_dir = TempDir::new().unwrap();
+        let image_path = create_test_jpeg(temp_dir.path(), "sizes.jpg");
+        let small = get_image_base64_cached(&image_path, 50).unwrap();
+        let large = get_image_base64_cached(&image_path, 400).unwrap();
+        let disk_small = get_data_cache_path(&image_path, 50).unwrap();
+        let disk_large = get_data_cache_path(&image_path, 400).unwrap();
+        assert_ne!(disk_small, disk_large);
+        assert_ne!(small.len(), large.len());
+    }
+
+    #[test]
+    fn test_corrupt_disk_cache_is_cleaned_and_redecoded() {
+        let temp_dir = TempDir::new().unwrap();
+        let image_path = create_test_jpeg(temp_dir.path(), "corrupt.jpg");
+        let disk_path = get_data_cache_path(&image_path, 100).unwrap();
+        if get_thumbnail_dir(&image_path).is_ok() {
+            std::fs::write(&disk_path, b"this is not a jpeg").unwrap();
+        }
+        let data = get_image_base64_cached(&image_path, 100).unwrap();
+        assert!(data.starts_with("data:image/jpeg;base64,"));
+        let stored = std::fs::read(&disk_path).unwrap();
+        assert!(stored.starts_with(&[0xFF, 0xD8]));
     }
 
     #[test]
