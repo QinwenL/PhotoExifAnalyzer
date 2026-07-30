@@ -102,6 +102,15 @@ interface AppState {
   isDeleting: boolean
   deleteProgress: number
 
+  // Thumbnail loading progress
+  // `thumbnailEpoch` is incremented whenever a new scan starts so that
+  // settled promises from an earlier-scan batch are no-op'ed against
+  // the fresh counters (prevents cross-scan counter drift).
+  thumbnailEpoch: number
+  thumbnailPending: number
+  thumbnailLoaded: number
+  thumbnailErrors: number
+
   // Actions
   setSelectedDirectory: (dir: string | null) => void
   scanDirectory: (dir: string, recursive: boolean) => Promise<void>
@@ -124,6 +133,9 @@ interface AppState {
   filterByCamera: (camera: string) => void
   filterByLens: (lens: string) => void
   resetFilter: () => void
+  beginThumbnailLoad: (path: string, epoch: number) => void
+  completeThumbnailLoad: (path: string, ok: boolean, epoch: number) => void
+  resetThumbnailProgress: () => void
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -151,6 +163,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   detailMode: 'simple',
   isDeleting: false,
   deleteProgress: 0,
+  thumbnailEpoch: 0,
+  thumbnailPending: 0,
+  thumbnailLoaded: 0,
+  thumbnailErrors: 0,
 
   // Actions
   setSelectedDirectory: (dir) => {
@@ -162,6 +178,20 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   scanDirectory: async (dir, recursive) => {
     set({ isScanning: true, scanProgress: 0 })
+    // Bump thumbnailEpoch to rotate to a new counter bucket before the
+    // batch of `beginThumbnailLoad` calls that the re-mounted Thumbnail
+    // components will fire. This is REQUIRED for correctness in the
+    // "cancel + immediately re-scan same dir" scenario:
+    //   - `Thumbnail` subscribes to `thumbnailEpoch` via a Zustand
+    //     selector, so epoch change ⇒ re-render ⇒ effect re-run for
+    //     EVERY tile that still has src===null (otherwise those tiles
+    //     stay as `animate-pulse` skeletons forever because React
+    //     reuses the same key={path} component instance).
+    //   - begin/complete callbacks gate their counter mutations on
+    //     `epoch === state.thumbnailEpoch`, so in-flight completes from
+    //     the previous scan are silently dropped instead of corrupting
+    //     the new batch's counters.
+    get().resetThumbnailProgress()
     try {
       const results: ScanResult[] = await invoke('scan_images', { dir, recursive })
       set({
@@ -179,6 +209,11 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   scanDirectoryWithProgress: async (dir, recursive) => {
     set({ isScanning: true, scanProgress: 0 })
+    // Same rationale as scanDirectory (see comment above): rotate the
+    // thumbnail epoch so stale-skeleton tiles re-fire their load effect
+    // and in-flight completes from the cancelled previous batch are
+    // gated out by the epoch check in completeThumbnailLoad.
+    get().resetThumbnailProgress()
     try {
       const progressHandler = listen('scan_progress', (event) => {
         set({ scanProgress: event.payload as number })
@@ -388,6 +423,43 @@ export const useAppStore = create<AppState>((set, get) => ({
   resetFilter: () => {
     const { scanResults } = get()
     set({ filterCriteria: { and_mode: false }, filteredResults: scanResults })
+  },
+
+  beginThumbnailLoad: (path, epoch) => {
+    void path
+    // Functional set guarantees atomic read→update even with concurrent
+    // microtasks from many Thumbnail components (eliminates lost updates).
+    // Drop calls from previous scan epochs entirely.
+    set((state) => (epoch !== state.thumbnailEpoch ? {} : {
+      thumbnailPending: state.thumbnailPending + 1,
+    }))
+  },
+
+  completeThumbnailLoad: (path, ok, epoch) => {
+    void path
+    set((state) => {
+      if (epoch !== state.thumbnailEpoch) return {}
+      const pending = Math.max(0, state.thumbnailPending - 1)
+      if (ok) {
+        return {
+          thumbnailPending: pending,
+          thumbnailLoaded: state.thumbnailLoaded + 1,
+        }
+      }
+      return {
+        thumbnailPending: pending,
+        thumbnailErrors: state.thumbnailErrors + 1,
+      }
+    })
+  },
+
+  resetThumbnailProgress: () => {
+    set((state) => ({
+      thumbnailEpoch: state.thumbnailEpoch + 1,
+      thumbnailPending: 0,
+      thumbnailLoaded: 0,
+      thumbnailErrors: 0,
+    }))
   },
 }))
 

@@ -1,6 +1,16 @@
 use std::path::{Path, PathBuf};
 
 const THUMBNAIL_SIZE: u32 = 150;
+/// Absolute ceiling for `max_size` accepted by any entrypoint in this
+/// module. Also enforced at the Tauri command layer (lib.rs) as a second
+/// defensive clamp. Use 4096 = ~16.7 Mpix which is plenty for any desktop
+/// thumbnail use case while keeping memory & CPU bounded.
+pub const MAX_ALLOWED_THUMBNAIL_SIZE: u32 = 4096;
+/// Conservative upper bound for on-disk size-cache files. A 4096x4096
+/// quality-85 JPEG of worst-case (random) pixel noise typically peaks at
+/// ~22 MiB. We leave ~1.9× headroom so future callers bumping the quality
+/// or the pixel ceiling slightly won't trip the "stale file" logic.
+const MAX_DISK_CACHE_BYTES: u64 = 42 * 1024 * 1024;
 
 const RAW_EXTENSIONS: &[&str] = &[
     "cr2", "cr3", "crw",
@@ -163,6 +173,47 @@ fn find_jpeg_eoi(data: &[u8], from_pos: usize) -> Option<usize> {
         .map(|p| from_pos + p + 1)
 }
 
+fn get_thumbnail_dir(image_path: &Path) -> Result<PathBuf, String> {
+    let parent = image_path
+        .parent()
+        .ok_or_else(|| format!("Cannot get parent directory: {}", image_path.display()))?;
+
+    let thumb_dir = parent.join(".thumbnails");
+
+    if !thumb_dir.exists() {
+        std::fs::create_dir_all(&thumb_dir)
+            .map_err(|e| format!("Failed to create thumbnail directory: {}", e))?;
+    }
+
+    Ok(thumb_dir)
+}
+
+/// Shared helper for stem + hash computation. Both the fixed 150-px thumbnail
+/// and all size-aware data cache files derive their names from this pair.
+fn get_thumbnail_stem_hash(path: &Path) -> Result<(String, u64), String> {
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| format!("Invalid filename: {}", path.display()))?;
+
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    let hash = hasher.finish();
+
+    Ok((stem.to_string(), hash))
+}
+
+fn get_thumbnail_name(path: &Path) -> Result<String, String> {
+    let (stem, hash) = get_thumbnail_stem_hash(path)?;
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("jpg");
+    Ok(format!("{stem}_{hash}.{ext}"))
+}
+
 pub fn get_thumbnail_path(path: &Path) -> Result<PathBuf, String> {
     let thumb_dir = get_thumbnail_dir(path)?;
     let thumb_name = get_thumbnail_name(path)?;
@@ -186,41 +237,6 @@ pub fn get_thumbnail_path(path: &Path) -> Result<PathBuf, String> {
     Ok(thumb_path)
 }
 
-fn get_thumbnail_dir(image_path: &Path) -> Result<PathBuf, String> {
-    let parent = image_path
-        .parent()
-        .ok_or_else(|| format!("Cannot get parent directory: {}", image_path.display()))?;
-
-    let thumb_dir = parent.join(".thumbnails");
-
-    if !thumb_dir.exists() {
-        std::fs::create_dir_all(&thumb_dir)
-            .map_err(|e| format!("Failed to create thumbnail directory: {}", e))?;
-    }
-
-    Ok(thumb_dir)
-}
-
-fn get_thumbnail_name(path: &Path) -> Result<String, String> {
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| format!("Invalid filename: {}", path.display()))?;
-
-    let ext = path
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("jpg");
-
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    path.hash(&mut hasher);
-    let hash = hasher.finish();
-
-    Ok(format!("{}_{}.{ext}", stem, hash))
-}
-
 fn generate_thumbnail(input_path: &Path, output_path: &Path) -> Result<(), String> {
     let img = open_image(input_path)?;
 
@@ -234,40 +250,55 @@ fn generate_thumbnail(input_path: &Path, output_path: &Path) -> Result<(), Strin
     Ok(())
 }
 
-pub fn get_image_base64(path: &Path, max_size: u32) -> Result<String, String> {
-    if max_size <= THUMBNAIL_SIZE {
+/// Compute resized JPEG bytes WITHOUT base64 wrapping. This is the hot path
+/// reused by both `get_image_base64` (encode once) and
+/// `get_image_base64_cached` (write bytes to disk directly, skip the
+/// encode-decode round-trip).
+fn get_image_jpeg_bytes(path: &Path, max_size: u32) -> Result<Vec<u8>, String> {
+    // Defensive clamp at the function layer. The Tauri command layer also
+    // clamps; the redundancy protects against future non-command callers
+    // that might bypass the command layer (tests, other Rust modules).
+    let max_size = max_size.max(1).min(MAX_ALLOWED_THUMBNAIL_SIZE);
+    let img = if max_size <= THUMBNAIL_SIZE {
         if let Ok(thumb_path) = get_thumbnail_path(path) {
             if let Ok(thumb) = image::open(&thumb_path) {
-                let resized = if thumb.width() > max_size || thumb.height() > max_size {
+                let img = if thumb.width() > max_size || thumb.height() > max_size {
                     thumb.resize(max_size, max_size, image::imageops::FilterType::Triangle)
                 } else {
                     thumb
                 };
-                return encode_to_base64(&resized);
+                return encode_jpeg_bytes(&img);
             }
         }
-    }
+        open_image(path)?
+    } else {
+        open_image(path)?
+    };
 
-    let img = open_image(path)?;
     let resized = if img.width() > max_size || img.height() > max_size {
         img.resize(max_size, max_size, image::imageops::FilterType::Lanczos3)
     } else {
         img
     };
 
+    // Make sure the fixed-size 150-px thumbnail exists too so subsequent
+    // small-size calls can take the fast path above.
     let _ = get_thumbnail_path(path);
 
-    encode_to_base64(&resized)
+    encode_jpeg_bytes(&resized)
 }
 
-fn encode_to_base64(img: &image::DynamicImage) -> Result<String, String> {
+fn encode_jpeg_bytes(img: &image::DynamicImage) -> Result<Vec<u8>, String> {
     let mut buffer = std::io::Cursor::new(Vec::new());
     img.write_to(&mut buffer, image::ImageOutputFormat::Jpeg(85))
         .map_err(|e| format!("Failed to encode image: {}", e))?;
+    Ok(buffer.into_inner())
+}
 
+pub fn get_image_base64(path: &Path, max_size: u32) -> Result<String, String> {
+    let bytes = get_image_jpeg_bytes(path, max_size)?;
     use base64::Engine;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(buffer.into_inner());
-
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
     Ok(format!("data:image/jpeg;base64,{}", encoded))
 }
 
@@ -286,6 +317,58 @@ pub fn delete_thumbnail(path: &Path) -> Result<(), String> {
     if thumb_path.exists() {
         std::fs::remove_file(&thumb_path)
             .map_err(|e| format!("Failed to delete thumbnail: {}", e))?;
+    }
+    Ok(())
+}
+
+/// Remove all size-aware disk-cache files for a source image
+/// (`{stem}_{hash}_200.jpg`, `{stem}_{hash}_800.jpg`, …).
+/// Called from `cleanup_caches_async` when a source image is deleted.
+pub fn delete_all_size_caches(path: &Path) -> Result<(), String> {
+    let (stem, hash) = match get_thumbnail_stem_hash(path) {
+        Ok(pair) => pair,
+        Err(_) => return Ok(()),
+    };
+    let prefix = format!("{stem}_{hash}_");
+    let thumb_dir = match get_thumbnail_dir(path) {
+        Ok(d) => d,
+        Err(_) => return Ok(()),
+    };
+    let read_dir = match std::fs::read_dir(&thumb_dir) {
+        Ok(rd) => rd,
+        Err(e) => {
+            eprintln!(
+                "[thumbnail::delete_all_size_caches] Failed to read {}: {} \
+                 (size-cache files may be left orphaned until clear_thumbnails)",
+                thumb_dir.display(),
+                e
+            );
+            return Err(format!(
+                "Failed to enumerate thumbnail dir {}: {}",
+                thumb_dir.display(),
+                e
+            ));
+        }
+    };
+    for entry in read_dir.flatten() {
+        let entry_path = entry.path();
+        if !entry_path.is_file() {
+            continue;
+        }
+        let fname = entry_path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("");
+        if fname.starts_with(&prefix) {
+            if let Err(e) = std::fs::remove_file(&entry_path) {
+                eprintln!(
+                    "[thumbnail::delete_all_size_caches] Failed to remove orphan \
+                     size cache {}: {}",
+                    entry_path.display(),
+                    e
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -311,6 +394,202 @@ pub fn clear_thumbnails(dir: &Path) -> Result<usize, String> {
     }
 
     Ok(count)
+}
+
+use std::num::NonZeroUsize;
+
+const MEMORY_CACHE_CAPACITY: usize = 64;
+
+/// Memory cache entry payload. Bundling the disk cache mtime alongside the cached
+/// data URI lets us close the TOCTOU race between the "is disk cache
+/// still valid?" probe and the eventual "drop stale memory entry" pop()":
+/// if a concurrent thread has refreshed the cache entry between our probe and
+/// our pop(), the bundled disk_mtime will differ from what we read during
+/// the probe and we'll skip the pop.
+#[derive(Clone)]
+struct MemCacheEntry {
+    data_uri: String,
+    /// The `std::fs::metadata().modified()` timestamp of the size-aware disk
+    /// cache file at the moment this memory entry was written. `None` means
+    /// "written without a disk cache backing" (shouldn't happen in practice,
+    /// since the cold path always writes both caches).
+    disk_mtime: Option<std::time::SystemTime>,
+}
+
+lazy_static::lazy_static! {
+    static ref IMAGE_DATA_CACHE: std::sync::Mutex<
+        lru::LruCache<(std::path::PathBuf, u32), MemCacheEntry>
+    > = std::sync::Mutex::new(lru::LruCache::new(
+        NonZeroUsize::new(MEMORY_CACHE_CAPACITY).unwrap()
+    ));
+}
+
+/// Access `IMAGE_DATA_CACHE` safely, converting `Mutex::lock` poison into a
+/// stringified `Err` (matches project-wide `Result<T, String>` convention)
+/// instead of panicking the whole pool thread.
+fn with_memory_cache<F, R>(f: F) -> Result<R, String>
+where
+    F: FnOnce(&mut lru::LruCache<(std::path::PathBuf, u32), MemCacheEntry>) -> R,
+{
+    let mut guard = IMAGE_DATA_CACHE
+        .lock()
+        .map_err(|poison| format!("Image cache mutex poisoned: {}", poison))?;
+    Ok(f(&mut guard))
+}
+
+pub(crate) fn get_data_cache_path(
+    path: &std::path::Path,
+    max_size: u32,
+) -> Result<std::path::PathBuf, String> {
+    let dir = get_thumbnail_dir(path)?;
+    let (stem, hash) = get_thumbnail_stem_hash(path)?;
+    Ok(dir.join(format!("{stem}_{hash}_{max_size}.jpg")))
+}
+
+/// Returns `true` if `thumb_mtime >= source_mtime`; on any stat error we
+/// conservatively treat the cache as stale.
+fn disk_cache_fresh(disk_path: &Path, source_path: &Path) -> bool {
+    match (
+        source_path.metadata().and_then(|m| m.modified()),
+        disk_path.metadata().and_then(|m| m.modified()),
+    ) {
+        (Ok(sm), Ok(tm)) => tm >= sm,
+        _ => false,
+    }
+}
+
+/// Helper for the repeated "remove stale disk cache entry" pattern. Always
+/// logs on failure so operators can diagnose stuck "re-decode every time"
+/// issues caused by Windows file-handle pinning / ACLs / readonly bits.
+fn remove_stale_disk_cache(disk_path: &Path) {
+    if let Err(e) = std::fs::remove_file(disk_path) {
+        eprintln!(
+            "[thumbnail::cache] Failed to remove stale/invalid size cache {}: {} \
+             (source file may repeatedly be re-decoded until file is removable)",
+            disk_path.display(),
+            e
+        );
+    }
+}
+
+pub fn get_image_base64_cached(
+    path: &std::path::Path,
+    max_size: u32,
+) -> Result<String, String> {
+    let key = (path.to_path_buf(), max_size);
+    // Single computation for the whole function — hash + mkdir are O(1) but
+    // repeated three times in the naive version.
+    let disk_path_opt = get_data_cache_path(path, max_size).ok();
+
+    // Memory LRU cache probe. We only trust the hit when the matching
+    // size-aware disk cache entry is also present and fresh:
+    // `get_image_base64_cached` always writes BOTH caches together on the
+    // cold path, so a missing/stale disk entry implies the memory entry
+    // is stale too (the source file was edited/replaced with the same
+    // path since the last decode). Without this check scrolling back to
+    // an earlier-viewed photo after editing it would serve the stale
+    // in-memory bytes forever (until LRU eviction).
+    //
+    // TOCTOU: we capture the memory entry's bundled `disk_mtime` on GET.
+    // If we later decide to POP because disk cache looks stale, we verify
+    // the current entry still refers to the SAME disk_mtime — if not, a
+    // concurrent thread already refreshed the entry in the gap between
+    // the two mutex acquisitions and we must NOT drop the newly-written
+    // valid data.
+    let (mem_data, mem_disk_mtime) = match with_memory_cache(|cache| cache.get(&key).cloned())? {
+        Some(entry) => (Some(entry.data_uri), entry.disk_mtime),
+        None => (None, None),
+    };
+    if let Some(data) = mem_data {
+        let disk_valid = if let Some(ref dp) = disk_path_opt {
+            dp.exists() && disk_cache_fresh(dp, path)
+        } else {
+            false
+        };
+        if disk_valid {
+            return Ok(data);
+        }
+        // Memory entry is out of date — drop it with version gating so we
+        // don't stomp on a concurrent refresh that already happened.
+        let _ = with_memory_cache(|cache| {
+            if let Some(current) = cache.get(&key) {
+                if current.disk_mtime == mem_disk_mtime {
+                    cache.pop(&key);
+                }
+            }
+        });
+    }
+
+    // Disk cache hit path (size-aware) — validate mtime and size cap
+    if let Some(ref disk_path) = disk_path_opt {
+        if disk_path.exists() {
+            let fresh = disk_cache_fresh(disk_path, path);
+            let within_size = disk_path
+                .metadata()
+                .map(|m| m.len() <= MAX_DISK_CACHE_BYTES)
+                .unwrap_or(false);
+            match (fresh, within_size) {
+                (true, true) => match std::fs::read(disk_path) {
+                    Ok(bytes) if bytes.starts_with(&[0xFF, 0xD8]) => {
+                        use base64::Engine;
+                        let data = format!(
+                            "data:image/jpeg;base64,{}",
+                            base64::engine::general_purpose::STANDARD.encode(&bytes)
+                        );
+                        let disk_mtime_now = disk_path.metadata().and_then(|m| m.modified()).ok();
+                        let _ = with_memory_cache(|cache| {
+                            cache.put(
+                                key.clone(),
+                                MemCacheEntry {
+                                    data_uri: data.clone(),
+                                    disk_mtime: disk_mtime_now,
+                                },
+                            )
+                        });
+                        return Ok(data);
+                    }
+                    Ok(_) => remove_stale_disk_cache(disk_path),
+                    Err(_) => remove_stale_disk_cache(disk_path),
+                },
+                _ => {
+                    // Stale mtime OR oversized; remove the stale entry and
+                    // fall through to full decode.
+                    remove_stale_disk_cache(disk_path);
+                }
+            }
+        }
+    }
+
+    // Cold path: full decode -> JPEG bytes. Avoid base64 round-trip by
+    // writing raw bytes straight to disk.
+    let jpeg_bytes = get_image_jpeg_bytes(path, max_size)?;
+    use base64::Engine;
+    let mut disk_mtime_after_write: Option<std::time::SystemTime> = None;
+    if let Some(ref disk_path) = disk_path_opt {
+        if let Err(e) = std::fs::write(disk_path, &jpeg_bytes) {
+            eprintln!(
+                "[thumbnail::cache] Failed to write thumbnail cache {}: {}",
+                disk_path.display(),
+                e
+            );
+        } else {
+            disk_mtime_after_write = disk_path.metadata().and_then(|m| m.modified()).ok();
+        }
+    }
+    let data = format!(
+        "data:image/jpeg;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(&jpeg_bytes)
+    );
+    let _ = with_memory_cache(|cache| {
+        cache.put(
+            key,
+            MemCacheEntry {
+                data_uri: data.clone(),
+                disk_mtime: disk_mtime_after_write,
+            },
+        )
+    });
+    Ok(data)
 }
 
 #[cfg(test)]
@@ -396,6 +675,124 @@ mod tests {
         let count = clear_thumbnails(temp_dir.path()).unwrap();
         assert_eq!(count, 2);
         assert!(!thumb_dir.join("thumb1.jpg").exists());
+    }
+
+    #[test]
+    fn test_get_data_cache_path_has_size_suffix() {
+        let temp_dir = TempDir::new().unwrap();
+        let photo_dir = temp_dir.path().join("photos").join("2024");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        let image_path = photo_dir.join("img_001.jpg");
+        let path = Path::new(&image_path);
+        let p = get_data_cache_path(path, 200).unwrap();
+        let file_name = p.file_name().unwrap().to_str().unwrap();
+        assert!(file_name.contains("img_001_"));
+        assert!(file_name.ends_with("_200.jpg"));
+        assert!(p.parent().unwrap().ends_with(".thumbnails"));
+    }
+
+    #[test]
+    fn test_cached_decode_is_consistent() {
+        let temp_dir = TempDir::new().unwrap();
+        let image_path = create_test_jpeg(temp_dir.path(), "cached.jpg");
+        let data1 = get_image_base64_cached(&image_path, 100).unwrap();
+        assert!(data1.starts_with("data:image/jpeg;base64,"));
+        let data2 = get_image_base64_cached(&image_path, 100).unwrap();
+        assert_eq!(data1, data2);
+        let disk = get_data_cache_path(&image_path, 100).unwrap();
+        assert!(disk.exists());
+    }
+
+    #[test]
+    fn test_cached_decode_respects_max_size() {
+        let temp_dir = TempDir::new().unwrap();
+        let image_path = create_test_jpeg(temp_dir.path(), "sizes.jpg");
+        let small = get_image_base64_cached(&image_path, 50).unwrap();
+        let large = get_image_base64_cached(&image_path, 400).unwrap();
+        let disk_small = get_data_cache_path(&image_path, 50).unwrap();
+        let disk_large = get_data_cache_path(&image_path, 400).unwrap();
+        assert_ne!(disk_small, disk_large);
+        assert_ne!(small.len(), large.len());
+    }
+
+    #[test]
+    fn test_corrupt_disk_cache_is_cleaned_and_redecoded() {
+        let temp_dir = TempDir::new().unwrap();
+        let image_path = create_test_jpeg(temp_dir.path(), "corrupt.jpg");
+        let disk_path = get_data_cache_path(&image_path, 100).unwrap();
+        if get_thumbnail_dir(&image_path).is_ok() {
+            std::fs::write(&disk_path, b"this is not a jpeg").unwrap();
+        }
+        let data = get_image_base64_cached(&image_path, 100).unwrap();
+        assert!(data.starts_with("data:image/jpeg;base64,"));
+        let stored = std::fs::read(&disk_path).unwrap();
+        assert!(stored.starts_with(&[0xFF, 0xD8]));
+    }
+
+    #[test]
+    fn test_size_cache_invalidated_on_source_mtime_change() {
+        let temp_dir = TempDir::new().unwrap();
+        let image_path = create_test_jpeg(temp_dir.path(), "changing.jpg");
+
+        // First decode: 100x100 gray pixels, cache to disk
+        let data_before = get_image_base64_cached(&image_path, 100).unwrap();
+        let disk_path = get_data_cache_path(&image_path, 100).unwrap();
+        assert!(disk_path.exists());
+
+        // Ensure mtime advances (Windows NTFS has 100ns resolution; we sleep 2s
+        // to be safe across any filesystem that has 1s/2s mtime granularity).
+        std::thread::sleep(std::time::Duration::from_secs(2));
+
+        // Overwrite source with a LARGER, distinctly-different image that
+        // cannot produce identical resize output at max_size=100:
+        // 350x500 red-gradient pixels vs the original square 100x100 gray.
+        let (w, h) = (350u32, 500u32);
+        let new_img = image::RgbImage::from_fn(w, h, |x, y| {
+            let r = (x * 255 / w) as u8;
+            let g = (y * 255 / h) as u8;
+            image::Rgb([r, g, 128u8])
+        });
+        new_img.save(&image_path).unwrap();
+
+        // Call again — stale cache (old mtime) must be removed + regenerated
+        let data_after = get_image_base64_cached(&image_path, 100).unwrap();
+
+        // The source content is fundamentally different so the re-encoded
+        // data URI cannot match. (Checking the data URL string avoids any
+        // edge case where the raw JPEG bytes file-system-read has any
+        // transient encoding flakiness; it's the higher-level property we
+        // actually care about for users.)
+        assert_ne!(data_before, data_after);
+        assert!(data_before.starts_with("data:image/jpeg;base64,"));
+        assert!(data_after.starts_with("data:image/jpeg;base64,"));
+    }
+
+    #[test]
+    fn test_delete_all_size_caches_removes_orphaned_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let image_path = create_test_jpeg(temp_dir.path(), "source.jpg");
+
+        // Populate multiple size caches
+        let _ = get_image_base64_cached(&image_path, 50).unwrap();
+        let _ = get_image_base64_cached(&image_path, 200).unwrap();
+        let _ = get_image_base64_cached(&image_path, 800).unwrap();
+        let d50 = get_data_cache_path(&image_path, 50).unwrap();
+        let d200 = get_data_cache_path(&image_path, 200).unwrap();
+        let d800 = get_data_cache_path(&image_path, 800).unwrap();
+        assert!(d50.exists());
+        assert!(d200.exists());
+        assert!(d800.exists());
+
+        delete_all_size_caches(&image_path).unwrap();
+        assert!(!d50.exists());
+        assert!(!d200.exists());
+        assert!(!d800.exists());
+
+        // Fixed-size thumbnail (150px) is NOT removed by delete_all_size_caches
+        // (that's delete_thumbnail's job) — confirm it was created by earlier
+        // warm-up calls and is still present.
+        let fixed_thumb = get_thumbnail_path(&image_path).unwrap();
+        assert!(fixed_thumb.exists());
     }
 
     #[test]

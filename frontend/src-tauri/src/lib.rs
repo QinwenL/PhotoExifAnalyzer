@@ -11,7 +11,7 @@ use exif::stats::{
 };
 use serde::Serialize;
 use exif::file_ops::{delete_file, delete_files};
-use exif::thumbnail::{delete_thumbnail, get_thumbnail_path, get_image_base64};
+use exif::thumbnail::{delete_thumbnail, delete_all_size_caches, get_thumbnail_path};
 
 lazy_static::lazy_static! {
     static ref SCAN_CANCELLED: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
@@ -124,8 +124,10 @@ fn cleanup_caches_async(paths: Vec<String>) {
         for path_str in paths.iter() {
             let path = Path::new(path_str);
 
-            // Clean up thumbnail cache
+            // Clean up fixed-size thumbnail (150x150)
             let _ = delete_thumbnail(path);
+            // Clean up all size-aware disk caches ({stem}_{hash}_{size}.jpg)
+            let _ = delete_all_size_caches(path);
 
             // Clean up EXIF cache
             if let Some(cache) = EXIF_CACHE.as_ref() {
@@ -195,18 +197,21 @@ fn get_thumbnail(path: String) -> Result<String, String> {
     Ok(thumb_path.to_string_lossy().to_string())
 }
 
-#[derive(serde::Deserialize)]
-struct ImageDataArgs {
-    path: String,
-    #[serde(rename = "maxSize")]
-    max_size: Option<u32>,
-}
-
 #[tauri::command]
-fn get_image_data(args: ImageDataArgs) -> Result<String, String> {
-    let path = Path::new(&args.path);
-    let size = args.max_size.unwrap_or(200);
-    get_image_base64(path, size)
+async fn get_image_data(path: String, max_size: Option<u32>) -> Result<String, String> {
+    let path = std::path::PathBuf::from(path);
+    // Command-layer clamp. Also clamped again inside `get_image_jpeg_bytes`
+    // as defense-in-depth for non-command callers; the redundancy is
+    // intentional (public surface defense + module defense).
+    let size = max_size
+        .filter(|&s| s > 0)
+        .unwrap_or(800)
+        .min(exif::thumbnail::MAX_ALLOWED_THUMBNAIL_SIZE);
+    tauri::async_runtime::spawn_blocking(move || {
+        exif::thumbnail::get_image_base64_cached(&path, size)
+    })
+    .await
+    .map_err(|e| format!("Image decode task failed: {}", e))?
 }
 
 #[derive(Debug, Serialize)]
