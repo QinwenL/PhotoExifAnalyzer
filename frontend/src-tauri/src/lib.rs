@@ -9,7 +9,7 @@ use exif::stats::{
     filter_results, CameraStats, FilterCriteria, FocalLengthStats, LensStats,
 };
 use serde::Serialize;
-use exif::file_ops::{delete_file, delete_files};
+use exif::file_ops::{delete_file, delete_files, delete_files_with_progress_callback};
 use exif::thumbnail::{get_thumbnail_path, get_image_base64};
 
 lazy_static::lazy_static! {
@@ -71,11 +71,9 @@ fn delete_images(paths: Vec<String>) -> Vec<Result<(), String>> {
 }
 
 #[tauri::command]
-fn delete_images_with_progress(paths: Vec<String>) -> Vec<Result<(), String>> {
-    delete_files_with_progress_callback(&paths, |progress| {
-        if let Some(window) = tauri::Window::get_by_label("main") {
-            let _ = window.emit("delete_progress", progress);
-        }
+fn delete_images_with_progress(window: tauri::Window, paths: Vec<String>) -> Vec<Result<(), String>> {
+    delete_files_with_progress_callback(&paths, move |progress| {
+        let _ = window.emit("delete_progress", progress);
     })
 }
 
