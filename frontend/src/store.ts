@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/tauri'
 import { listen } from '@tauri-apps/api/event'
 import { create } from 'zustand'
 import { formatCamera } from '@/lib/utils'
+import { interpretDeleteResults } from '@/lib/delete-result'
 
 // Types matching Rust backend
 export interface ExifData {
@@ -136,6 +137,8 @@ interface AppState {
   // Delete progress
   isDeleting: boolean
   deleteProgress: number
+  /** 最近一次批量删除中失败的路径与错误消息（null 表示无失败或未删除） */
+  lastDeleteFailures: Array<{ path: string; error: string }> | null
 
   // Thumbnail loading progress
   // `thumbnailEpoch` is incremented whenever a new scan starts so that
@@ -197,6 +200,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   detailMode: 'simple',
   isDeleting: false,
   deleteProgress: 0,
+  lastDeleteFailures: null,
   thumbnailEpoch: 0,
   thumbnailPending: 0,
   thumbnailLoaded: 0,
@@ -289,22 +293,45 @@ export const useAppStore = create<AppState>((set, get) => ({
     })
 
     const paths = Array.from(selectedImages)
-    await invoke('delete_images_with_progress', { paths })
 
-    await progressHandler
+    try {
+      // 后端返回 Vec<Result<(), String>>：每个元素对应一个路径的删除结果
+      const results = await invoke<unknown[]>('delete_images_with_progress', { paths })
+      await progressHandler
 
-    // Remove deleted images from results
-    const remaining = scanResults.filter((r) => !selectedImages.has(r.path))
-    set({
-      scanResults: remaining,
-      filteredResults: remaining,
-      selectedImages: new Set(),
-      isDeleting: false,
-      deleteProgress: 100,
-    })
+      const outcome = interpretDeleteResults(results, paths)
+      const deletedPaths = new Set(
+        outcome.succeededIndices.map((i) => paths[i])
+      )
 
-    // Update statistics
-    get().updateStatistics()
+      // 仅移除成功删除的图片，失败的保留在列表中
+      const remaining = scanResults.filter((r) => !deletedPaths.has(r.path))
+
+      set({
+        scanResults: remaining,
+        filteredResults: remaining,
+        selectedImages: new Set(),
+        // 重置 lastSelectedIndex 避免下次 Shift+Click 使用陈旧索引
+        lastSelectedIndex: null,
+        isDeleting: false,
+        deleteProgress: 100,
+        // 暴露失败信息供 UI 提示（如有）
+        lastDeleteFailures: outcome.failedIndices.size > 0
+          ? Array.from(outcome.failedIndices.entries()).map(([i, err]) => ({
+              path: paths[i],
+              error: err,
+            }))
+          : null,
+      })
+
+      // Update statistics
+      get().updateStatistics()
+    } catch (error) {
+      // 整体调用失败（IPC 错误等）：复位 isDeleting，保留状态不变
+      await progressHandler.catch(() => {})
+      console.error('Delete failed:', error)
+      set({ isDeleting: false, deleteProgress: 0 })
+    }
   },
 
   toggleImageSelection: (path, index, shiftKey, ctrlKey) => {
