@@ -307,6 +307,42 @@ mod tests {
     }
 
     #[test]
+    fn test_scan_with_cache_emits_progress() {
+        // Task 4.10: progress callback must be invoked (not a no-op) on the cache path,
+        // and values must monotonically increase to 100.
+        let temp_dir = TempDir::new().unwrap();
+        create_test_image(temp_dir.path(), "a.jpg");
+        create_test_image(temp_dir.path(), "b.jpg");
+        create_test_image(temp_dir.path(), "c.jpg");
+        create_test_image(temp_dir.path(), "d.jpg");
+
+        let cache = ExifCache::new(temp_dir.path()).unwrap();
+        let cache = Arc::new(Mutex::new(cache));
+
+        let progress_values = Arc::new(Mutex::new(Vec::new()));
+        let progress_clone = Arc::clone(&progress_values);
+
+        let results = scan_directory_with_cache(
+            temp_dir.path(),
+            true,
+            Some(cache),
+            move |p| progress_clone.lock().unwrap().push(p),
+            || false,
+        );
+
+        assert_eq!(results.len(), 4);
+
+        let values = progress_values.lock().unwrap();
+        assert!(!values.is_empty(), "progress callback must be invoked on cache path");
+        // Values should be monotonically non-decreasing
+        for w in values.windows(2) {
+            assert!(w[1] >= w[0], "progress must be non-decreasing: {:?}", *values);
+        }
+        // Final value must reach 100%
+        assert_eq!(*values.last().unwrap(), 100.0, "final progress must be 100%");
+    }
+
+    #[test]
     fn test_scan_with_cancel() {
         let temp_dir = TempDir::new().unwrap();
         create_test_image(temp_dir.path(), "photo1.jpg");
