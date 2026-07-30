@@ -65,6 +65,7 @@ export interface FilterCriteria {
   aperture?: [number, number]
   iso?: [number, number]
   exposure_time?: [number, number]
+  date_range?: [string, string]
   and_mode: boolean
 }
 

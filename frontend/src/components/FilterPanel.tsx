@@ -31,6 +31,8 @@ export function FilterPanel() {
   const [apertureMax, setApertureMax] = useState(filterCriteria.aperture?.[1]?.toString() || '')
   const [isoMin, setIsoMin] = useState(filterCriteria.iso?.[0]?.toString() || '')
   const [isoMax, setIsoMax] = useState(filterCriteria.iso?.[1]?.toString() || '')
+  const [dateStart, setDateStart] = useState(filterCriteria.date_range?.[0] || '')
+  const [dateEnd, setDateEnd] = useState(filterCriteria.date_range?.[1] || '')
 
   const toggleCamera = (camera: string) => {
     const newSelected = new Set(selectedCameras)
@@ -86,6 +88,10 @@ export function FilterPanel() {
       ]
     }
 
+    if (dateStart || dateEnd) {
+      criteria.date_range = [dateStart, dateEnd]
+    }
+
     setFilterCriteria(criteria)
     applyFilter()
   }
@@ -99,6 +105,8 @@ export function FilterPanel() {
     setApertureMax('')
     setIsoMin('')
     setIsoMax('')
+    setDateStart('')
+    setDateEnd('')
     setLocalCriteria({ and_mode: false })
     setFilterCriteria({ and_mode: false })
     applyFilter()
@@ -112,7 +120,9 @@ export function FilterPanel() {
     apertureMin ||
     apertureMax ||
     isoMin ||
-    isoMax
+    isoMax ||
+    dateStart ||
+    dateEnd
 
   return (
     <div className="border-b border-border">
@@ -257,6 +267,26 @@ export function FilterPanel() {
                 placeholder="最大"
                 value={isoMax}
                 onChange={(e) => setIsoMax(e.target.value)}
+                className="w-full px-2 py-1 text-sm border rounded bg-background"
+              />
+            </div>
+          </div>
+
+          {/* Date Range */}
+          <div>
+            <h4 className="text-sm font-medium text-muted-foreground mb-2">日期范围</h4>
+            <div className="flex gap-2">
+              <input
+                type="date"
+                value={dateStart}
+                onChange={(e) => setDateStart(e.target.value)}
+                className="w-full px-2 py-1 text-sm border rounded bg-background"
+              />
+              <span className="text-muted-foreground">-</span>
+              <input
+                type="date"
+                value={dateEnd}
+                onChange={(e) => setDateEnd(e.target.value)}
                 className="w-full px-2 py-1 text-sm border rounded bg-background"
               />
             </div>
