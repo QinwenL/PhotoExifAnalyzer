@@ -1,6 +1,7 @@
 pub mod file_ops;
 pub mod parser;
 pub mod scanner;
+pub mod stats;
 
 use serde::{Deserialize, Serialize};
 
