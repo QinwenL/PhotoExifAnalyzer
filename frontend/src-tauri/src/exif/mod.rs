@@ -1,3 +1,5 @@
+pub mod parser;
+
 use serde::{Deserialize, Serialize};
 
 /// EXIF data extracted from an image
