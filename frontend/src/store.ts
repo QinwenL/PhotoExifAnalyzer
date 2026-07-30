@@ -129,6 +129,13 @@ interface AppState {
   errorMessage: string | null
   clearErrorMessage: () => void
 
+  // P1.7: EXIF 缓存初始化失败时的警告消息（null 表示缓存正常或尚未查询）。
+  // 由 App 挂载时调用 get_cache_status 获取；非 null 时 UI 显示非阻塞警告，
+  // 告知用户重复扫描会变慢。
+  cacheWarning: string | null
+  clearCacheWarning: () => void
+  queryCacheStatus: () => Promise<void>
+
   // Data
   scanResults: ScanResult[]
   filteredResults: ScanResult[]
@@ -205,6 +212,20 @@ export const useAppStore = create<AppState>((set, get) => ({
   scanTotal: null,
   errorMessage: null,
   clearErrorMessage: () => set({ errorMessage: null }),
+  cacheWarning: null,
+  clearCacheWarning: () => set({ cacheWarning: null }),
+  queryCacheStatus: async () => {
+    try {
+      const [available, error] = await invoke<[boolean, string | null]>('get_cache_status')
+      if (!available && error) {
+        set({ cacheWarning: `EXIF 缓存不可用：${error}（重复扫描会变慢）` })
+      } else {
+        set({ cacheWarning: null })
+      }
+    } catch {
+      // 命令不存在或调用失败时不阻塞应用启动
+    }
+  },
   scanResults: [],
   filteredResults: [],
   cameraStats: null,

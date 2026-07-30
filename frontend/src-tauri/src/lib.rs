@@ -18,20 +18,71 @@ lazy_static::lazy_static! {
     static ref SCAN_CANCELLED: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
     /// Global EXIF cache stored in the app's data directory.
     /// Initialized lazily on first scan; shared across all scan operations.
-    pub(crate) static ref EXIF_CACHE: Option<Arc<Mutex<ExifCache>>> = init_cache();
+    /// None if initialization failed (see `CACHE_INIT_ERROR` for the reason).
+    pub(crate) static ref EXIF_CACHE: Option<Arc<Mutex<ExifCache>>> = {
+        let (cache, error) = init_cache_with_reason();
+        if let Some(err) = &error {
+            // P1.7: surface the failure reason instead of silently degrading.
+            // The frontend can also query `get_cache_status` to show a banner.
+            eprintln!("[warn] EXIF cache disabled: {}", err);
+        }
+        // Stash the error reason so `get_cache_status` can report it.
+        if let Some(err) = error {
+            *CACHE_INIT_ERROR.lock().unwrap() = Some(err);
+        }
+        cache
+    };
+
+    /// P1.7: Records WHY the EXIF cache failed to initialize (None if it
+    /// succeeded or hasn't been queried yet). Surfaced to the frontend via
+    /// the `get_cache_status` Tauri command so the UI can warn the user
+    /// that repeat scans will be slower.
+    static ref CACHE_INIT_ERROR: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 }
 
 /// Initialize the EXIF cache in the user's app data directory.
 /// Returns None if the directory cannot be determined or cache creation fails.
 fn init_cache() -> Option<Arc<Mutex<ExifCache>>> {
-    let cache_dir = get_cache_dir()?;
+    init_cache_with_reason().0
+}
+
+/// Like `init_cache` but also returns the failure reason (if any) so the
+/// caller can log it or surface it to the UI. Used by the `EXIF_CACHE`
+/// lazy_static initializer.
+fn init_cache_with_reason() -> (Option<Arc<Mutex<ExifCache>>>, Option<String>) {
+    let cache_dir = match get_cache_dir() {
+        Some(d) => d,
+        None => {
+            return (
+                None,
+                Some(
+                    "Could not determine app data directory (no APPDATA or HOME env var)"
+                        .to_string(),
+                ),
+            )
+        }
+    };
     // Ensure the cache directory exists
-    if std::fs::create_dir_all(&cache_dir).is_err() {
-        return None;
+    if let Err(e) = std::fs::create_dir_all(&cache_dir) {
+        return (
+            None,
+            Some(format!(
+                "Failed to create cache directory at {}: {}",
+                cache_dir.display(),
+                e
+            )),
+        );
     }
     match ExifCache::new(&cache_dir) {
-        Ok(cache) => Some(Arc::new(Mutex::new(cache))),
-        Err(_) => None,
+        Ok(cache) => (Some(Arc::new(Mutex::new(cache))), None),
+        Err(e) => (
+            None,
+            Some(format!(
+                "Failed to open EXIF cache DB at {}: {}",
+                cache_dir.display(),
+                e
+            )),
+        ),
     }
 }
 
@@ -48,6 +99,17 @@ fn get_cache_dir() -> Option<PathBuf> {
         return Some(PathBuf::from(home).join(".local/share/photo-exif-analyzer"));
     }
     None
+}
+
+/// Query the EXIF cache initialization status. Exposed as a Tauri command
+/// so the frontend can warn the user when caching is unavailable (P1.7).
+/// Returns `(available, error_reason)` where `error_reason` is None if
+/// the cache is healthy or hasn't been queried yet.
+#[tauri::command]
+fn get_cache_status() -> (bool, Option<String>) {
+    let available = EXIF_CACHE.is_some();
+    let error = CACHE_INIT_ERROR.lock().unwrap().clone();
+    (available, error)
 }
 
 #[tauri::command]
@@ -338,6 +400,7 @@ pub fn run() {
             delete_images_with_progress,
             get_image_data,
             export_statistics,
+            get_cache_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -350,6 +413,7 @@ mod tests {
     // pulled in via `--extern`, producing E0659 "ambiguous name". Importing
     // only the specific items we need avoids the glob collision.
     use super::export_statistics;
+    use super::init_cache_with_reason;
     use crate::exif::scanner::ScanResult;
     use crate::exif::ExifData;
     use std::path::PathBuf;
@@ -603,5 +667,69 @@ mod tests {
 
         // Focal length stats: 2 at 50mm + 1 at 24mm
         assert_eq!(data.statistics.focal_length.total, 3);
+    }
+
+    // ---- P1.7: EXIF cache initialization failure handling ----
+
+    #[test]
+    fn test_init_cache_with_reason_returns_error_when_env_missing() {
+        // P1.7: when neither APPDATA nor HOME is set, init_cache_with_reason
+        // must return (None, Some(reason)) — NOT silently (None, None).
+        // We can't fully control env vars in a test, but we CAN assert that
+        // the error branch is reachable: by clearing both env vars (saving
+        // and restoring them) and verifying the reason is non-empty.
+        //
+        // NOTE: This test is best-effort. If the test runner has neither
+        // APPDATA nor HOME set natively, the "missing env" path is exercised
+        // directly. If either is set, we temporarily remove it; the test
+        // is still valid because `init_cache_with_reason` re-reads env.
+        let saved_appdata = std::env::var_os("APPDATA");
+        let saved_home = std::env::var_os("HOME");
+
+        std::env::remove_var("APPDATA");
+        std::env::remove_var("HOME");
+
+        let (cache, error) = init_cache_with_reason();
+
+        // Restore env vars regardless of test outcome
+        if let Some(v) = saved_appdata { std::env::set_var("APPDATA", v); }
+        if let Some(v) = saved_home { std::env::set_var("HOME", v); }
+
+        assert!(cache.is_none(), "cache must be None when env vars are missing");
+        let reason = error.expect("error reason must be Some when init fails");
+        assert!(
+            !reason.is_empty(),
+            "error reason must not be empty (was: {:?})",
+            reason
+        );
+        assert!(
+            reason.to_lowercase().contains("app data directory")
+                || reason.to_lowercase().contains("appdata")
+                || reason.to_lowercase().contains("home"),
+            "error reason should mention the missing env var, got: {:?}",
+            reason
+        );
+    }
+
+    #[test]
+    fn test_init_cache_with_reason_returns_cache_on_success() {
+        // P1.7: when env vars ARE set and the cache dir is writable,
+        // init_cache_with_reason must return (Some(cache), None).
+        // Uses a temp dir as APPDATA to avoid polluting real app data.
+        let temp = tempfile::TempDir::new().unwrap();
+        std::env::set_var("APPDATA", temp.path());
+
+        let (cache, error) = init_cache_with_reason();
+
+        // Restore: clear our override so other tests aren't affected.
+        // (The real APPDATA is restored by the test harness or OS env.)
+        std::env::remove_var("APPDATA");
+
+        assert!(cache.is_some(), "cache should initialize successfully in a writable temp dir");
+        assert!(
+            error.is_none(),
+            "error reason must be None on success, got: {:?}",
+            error
+        );
     }
 }

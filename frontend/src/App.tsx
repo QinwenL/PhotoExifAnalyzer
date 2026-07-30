@@ -55,6 +55,9 @@ function App() {
     theme,
     errorMessage,
     clearErrorMessage,
+    cacheWarning,
+    clearCacheWarning,
+    queryCacheStatus,
     setSelectedDirectory,
     scanDirectoryWithProgress,
     cancelScan,
@@ -121,6 +124,8 @@ function App() {
   // 这里只需触发扫描；失败由 scanDirectoryWithProgress 内部的 catch
   // 设置 errorMessage，不会让应用卡死。
   useEffect(() => {
+    // P1.7: 查询 EXIF 缓存状态，失败时 UI 显示非阻塞警告
+    void queryCacheStatus()
     const lastDir = readLastDirectory()
     if (shouldAutoLoadLastDirectory(lastDir)) {
       void scanDirectoryWithProgress(lastDir, true)
@@ -221,6 +226,21 @@ function App() {
             size="sm"
             className="text-destructive hover:bg-destructive/20"
             onClick={clearErrorMessage}
+          >
+            ✕
+          </Button>
+        </div>
+      )}
+
+      {/* P1.7: Cache warning banner (non-blocking, amber) */}
+      {cacheWarning && (
+        <div className="bg-amber-500/10 border-b border-amber-500/30 px-4 py-2 flex items-center justify-between gap-4">
+          <p className="text-sm text-amber-700 dark:text-amber-400">{cacheWarning}</p>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="text-amber-700 dark:text-amber-400 hover:bg-amber-500/20"
+            onClick={clearCacheWarning}
           >
             ✕
           </Button>

@@ -19,6 +19,7 @@ describe('error reporting to UI', () => {
     vi.clearAllMocks()
     useAppStore.setState({
       errorMessage: null,
+      cacheWarning: null,
       isScanning: false,
       scanProgress: 0,
       scanProcessed: null,
