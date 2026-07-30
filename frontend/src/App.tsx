@@ -5,6 +5,7 @@ import { FocalLengthChart } from './components/FocalLengthChart'
 import { DistributionChart } from './components/DistributionChart'
 import { FilterPanel } from './components/FilterPanel'
 import { ImageDetail } from './components/ImageDetail'
+import { VirtualizedGrid, VirtualizedList } from './components/VirtualizedGrid'
 
 function App() {
   const {
@@ -118,7 +119,7 @@ function App() {
         </aside>
 
         {/* Main Area */}
-        <main className="flex-1 overflow-y-auto p-4">
+        <main className="flex-1 overflow-hidden p-4">
           {/* Toolbar */}
           <div className="flex items-center justify-between mb-4">
             <span className="text-sm text-muted-foreground">{filteredResults.length} 张图片</span>
@@ -151,61 +152,66 @@ function App() {
           </div>
 
           {/* Image Grid/List */}
-          {viewMode === 'grid' ? (
-            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-2">
-              {filteredResults.map((result) => (
-                <div
-                  key={result.path}
-                  className={`relative aspect-square border rounded-lg overflow-hidden cursor-pointer transition-all ${
-                    selectedImages.has(result.path)
-                      ? 'ring-2 ring-primary ring-offset-2'
-                      : 'hover:ring-2 hover:ring-primary/50'
-                  }`}
-                  onClick={() => useAppStore.getState().toggleImageSelection(result.path)}
-                  onDoubleClick={() => setSelectedDetailImage(result)}
-                >
-                  <div className="absolute inset-0 bg-muted flex items-center justify-center">
-                    <span className="text-xs text-muted-foreground truncate px-2">
-                      {result.path.split(/[/\\]/).pop()}
-                    </span>
-                  </div>
-                  {selectedImages.has(result.path) && (
-                    <div className="absolute top-2 right-2 w-5 h-5 bg-primary rounded-full flex items-center justify-center">
-                      <span className="text-primary-foreground text-xs">✓</span>
+          <div className="h-[calc(100vh-180px)]">
+            {viewMode === 'grid' ? (
+              <VirtualizedGrid
+                items={filteredResults}
+                columns={5}
+                renderItem={(result) => (
+                  <div
+                    key={result.path}
+                    className={`relative aspect-square border rounded-lg overflow-hidden cursor-pointer transition-all ${
+                      selectedImages.has(result.path)
+                        ? 'ring-2 ring-primary ring-offset-2'
+                        : 'hover:ring-2 hover:ring-primary/50'
+                    }`}
+                    onClick={() => useAppStore.getState().toggleImageSelection(result.path)}
+                    onDoubleClick={() => setSelectedDetailImage(result)}
+                  >
+                    <div className="absolute inset-0 bg-muted flex items-center justify-center">
+                      <span className="text-xs text-muted-foreground truncate px-2">
+                        {result.path.split(/[/\\]/).pop()}
+                      </span>
                     </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="space-y-1">
-              {filteredResults.map((result) => (
-                <div
-                  key={result.path}
-                  className={`flex items-center gap-3 p-2 rounded cursor-pointer transition-colors ${
-                    selectedImages.has(result.path) ? 'bg-primary/10' : 'hover:bg-muted'
-                  }`}
-                  onClick={() => useAppStore.getState().toggleImageSelection(result.path)}
-                  onDoubleClick={() => setSelectedDetailImage(result)}
-                >
-                  <input
-                    type="checkbox"
-                    checked={selectedImages.has(result.path)}
-                    onChange={() => {}}
-                    className="w-4 h-4"
-                  />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm truncate">{result.path.split(/[/\\]/).pop()}</p>
-                    <p className="text-xs text-muted-foreground truncate">{result.path}</p>
+                    {selectedImages.has(result.path) && (
+                      <div className="absolute top-2 right-2 w-5 h-5 bg-primary rounded-full flex items-center justify-center">
+                        <span className="text-primary-foreground text-xs">✓</span>
+                      </div>
+                    )}
                   </div>
-                  <div className="text-xs text-muted-foreground">
-                    {result.exif.make && <span>{result.exif.make} </span>}
-                    {result.exif.model && <span>{result.exif.model}</span>}
+                )}
+              />
+            ) : (
+              <VirtualizedList
+                items={filteredResults}
+                renderItem={(result) => (
+                  <div
+                    key={result.path}
+                    className={`flex items-center gap-3 p-2 rounded cursor-pointer transition-colors h-12 ${
+                      selectedImages.has(result.path) ? 'bg-primary/10' : 'hover:bg-muted'
+                    }`}
+                    onClick={() => useAppStore.getState().toggleImageSelection(result.path)}
+                    onDoubleClick={() => setSelectedDetailImage(result)}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selectedImages.has(result.path)}
+                      onChange={() => {}}
+                      className="w-4 h-4"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm truncate">{result.path.split(/[/\\]/).pop()}</p>
+                      <p className="text-xs text-muted-foreground truncate">{result.path}</p>
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      {result.exif.make && <span>{result.exif.make} </span>}
+                      {result.exif.model && <span>{result.exif.model}</span>}
+                    </div>
                   </div>
-                </div>
-              ))}
-            </div>
-          )}
+                )}
+              />
+            )}
+          </div>
 
           {/* Empty State */}
           {filteredResults.length === 0 && !isScanning && (
