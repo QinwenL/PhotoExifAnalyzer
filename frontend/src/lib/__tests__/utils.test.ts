@@ -1,5 +1,34 @@
 import { describe, expect, it } from 'vitest'
-import { formatCamera } from '../utils'
+import { formatCamera, getFileName } from '../utils'
+
+describe('getFileName', () => {
+  it('extracts filename from a Unix path', () => {
+    expect(getFileName('/home/user/photos/IMG_001.jpg')).toBe('IMG_001.jpg')
+  })
+
+  it('extracts filename from a Windows path', () => {
+    expect(getFileName('C:\\Users\\user\\photos\\IMG_001.jpg')).toBe('IMG_001.jpg')
+  })
+
+  it('extracts filename from a mixed-separator path', () => {
+    // Tauri on Windows can yield paths with either separator depending
+    // on the source (e.g. user-picked dirs use backslashes, but joined
+    // paths from Rust may use forward slashes).
+    expect(getFileName('C:/Users/user\\photos\\IMG_001.jpg')).toBe('IMG_001.jpg')
+  })
+
+  it('returns the input unchanged when no separator is present', () => {
+    expect(getFileName('IMG_001.jpg')).toBe('IMG_001.jpg')
+  })
+
+  it('returns empty string for a trailing separator', () => {
+    expect(getFileName('/photos/')).toBe('')
+  })
+
+  it('returns empty string for an empty path', () => {
+    expect(getFileName('')).toBe('')
+  })
+})
 
 describe('formatCamera', () => {
   it('returns "make model" when both make and model are present', () => {

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/tauri'
 import { useAppStore, type ScanResult } from '../store'
 import { Button } from '@/components/ui/button'
-import { formatCamera } from '@/lib/utils'
+import { formatCamera, getFileName } from '@/lib/utils'
 
 interface ImageDetailProps {
   result: ScanResult
@@ -63,7 +63,7 @@ export function ImageDetail({ result, onClose, onDelete }: ImageDetailProps) {
           ) : imageUrl ? (
             <img
               src={imageUrl}
-              alt={result.path.split(/[/\\]/).pop()}
+              alt={getFileName(result.path)}
               className="max-w-full max-h-[80vh] object-contain"
             />
           ) : (
@@ -76,7 +76,7 @@ export function ImageDetail({ result, onClose, onDelete }: ImageDetailProps) {
           <div className="p-4">
             <div className="flex items-center justify-between mb-4">
               <h3 className="font-semibold truncate" title={result.path}>
-                {result.path.split(/[/\\]/).pop()}
+                {getFileName(result.path)}
               </h3>
               <Button variant="ghost" size="sm" onClick={onClose}>
                 ✕

@@ -1,4 +1,5 @@
 import { Button } from '@/components/ui/button'
+import { getFileName } from '@/lib/utils'
 import type { ScanResult } from '../store'
 
 interface ConfirmDialogProps {
@@ -40,10 +41,10 @@ export function ConfirmDialog({
                 <div
                   key={img.path}
                   className="aspect-square bg-muted rounded flex items-center justify-center overflow-hidden"
-                  title={img.path.split(/[/\\]/).pop()}
+                  title={getFileName(img.path)}
                 >
                   <span className="text-[10px] text-muted-foreground truncate px-1">
-                    {img.path.split(/[/\\]/).pop()}
+                    {getFileName(img.path)}
                   </span>
                 </div>
               ))}

@@ -10,7 +10,7 @@ import { VirtualizedGrid, VirtualizedList } from './components/VirtualizedGrid'
 import { StatusBar } from './components/StatusBar'
 import { ConfirmDialog } from './components/ConfirmDialog'
 import { Thumbnail } from './components/Thumbnail'
-import { formatCamera } from '@/lib/utils'
+import { formatCamera, getFileName } from '@/lib/utils'
 import { getKeyboardAction, isTextInputTarget } from '@/lib/keyboard'
 import { shouldAutoLoadLastDirectory, readLastDirectory } from '@/lib/auto-load'
 
@@ -379,7 +379,7 @@ function App() {
                     {/* EXIF info overlay */}
                     <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 via-black/70 to-transparent px-1.5 pt-4 pb-1">
                       <p className="text-[10px] text-white truncate font-medium">
-                        {result.path.split(/[/\\]/).pop()}
+                        {getFileName(result.path)}
                       </p>
                       <div className="flex flex-wrap gap-x-1.5 gap-y-0 mt-0.5">
                         {formatCamera(result.exif) && (
@@ -450,7 +450,7 @@ function App() {
                       className="w-4 h-4"
                     />
                     <div className="flex-1 min-w-0">
-                      <p className="text-sm truncate">{result.path.split(/[/\\]/).pop()}</p>
+                      <p className="text-sm truncate">{getFileName(result.path)}</p>
                       {detailMode === 'detailed' ? (
                         <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1">
                           {result.exif.make && (

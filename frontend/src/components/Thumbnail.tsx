@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/tauri'
 import { withThumbnailSlot } from '../lib/semaphore'
+import { getFileName } from '@/lib/utils'
 import { useAppStore } from '../store'
 
 interface ThumbnailProps {
@@ -77,7 +78,7 @@ export function Thumbnail({ path, maxSize = 200, className = '' }: ThumbnailProp
     return (
       <div className={`bg-muted flex items-center justify-center ${className}`}>
         <span className="text-[10px] text-muted-foreground truncate px-1">
-          {path.split(/[/\\]/).pop()}
+          {getFileName(path)}
         </span>
       </div>
     )
