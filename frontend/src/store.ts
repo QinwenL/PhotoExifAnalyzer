@@ -103,6 +103,10 @@ interface AppState {
   deleteProgress: number
 
   // Thumbnail loading progress
+  // `thumbnailEpoch` is incremented whenever a new scan starts so that
+  // settled promises from an earlier-scan batch are no-op'ed against
+  // the fresh counters (prevents cross-scan counter drift).
+  thumbnailEpoch: number
   thumbnailPending: number
   thumbnailLoaded: number
   thumbnailErrors: number
@@ -129,8 +133,8 @@ interface AppState {
   filterByCamera: (camera: string) => void
   filterByLens: (lens: string) => void
   resetFilter: () => void
-  beginThumbnailLoad: (path: string) => void
-  completeThumbnailLoad: (path: string, ok: boolean) => void
+  beginThumbnailLoad: (path: string, epoch: number) => void
+  completeThumbnailLoad: (path: string, ok: boolean, epoch: number) => void
   resetThumbnailProgress: () => void
 }
 
@@ -159,6 +163,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   detailMode: 'simple',
   isDeleting: false,
   deleteProgress: 0,
+  thumbnailEpoch: 0,
   thumbnailPending: 0,
   thumbnailLoaded: 0,
   thumbnailErrors: 0,
@@ -403,31 +408,41 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ filterCriteria: { and_mode: false }, filteredResults: scanResults })
   },
 
-  beginThumbnailLoad: (path) => {
+  beginThumbnailLoad: (path, epoch) => {
     void path
-    const { thumbnailPending } = get()
-    set({ thumbnailPending: thumbnailPending + 1 })
+    // Functional set guarantees atomic read→update even with concurrent
+    // microtasks from many Thumbnail components (eliminates lost updates).
+    // Drop calls from previous scan epochs entirely.
+    set((state) => (epoch !== state.thumbnailEpoch ? {} : {
+      thumbnailPending: state.thumbnailPending + 1,
+    }))
   },
 
-  completeThumbnailLoad: (path, ok) => {
+  completeThumbnailLoad: (path, ok, epoch) => {
     void path
-    const { thumbnailPending, thumbnailLoaded, thumbnailErrors } = get()
-    const nextPending = Math.max(0, thumbnailPending - 1)
-    if (ok) {
-      set({
-        thumbnailPending: nextPending,
-        thumbnailLoaded: thumbnailLoaded + 1,
-      })
-    } else {
-      set({
-        thumbnailPending: nextPending,
-        thumbnailErrors: thumbnailErrors + 1,
-      })
-    }
+    set((state) => {
+      if (epoch !== state.thumbnailEpoch) return {}
+      const pending = Math.max(0, state.thumbnailPending - 1)
+      if (ok) {
+        return {
+          thumbnailPending: pending,
+          thumbnailLoaded: state.thumbnailLoaded + 1,
+        }
+      }
+      return {
+        thumbnailPending: pending,
+        thumbnailErrors: state.thumbnailErrors + 1,
+      }
+    })
   },
 
   resetThumbnailProgress: () => {
-    set({ thumbnailPending: 0, thumbnailLoaded: 0, thumbnailErrors: 0 })
+    set((state) => ({
+      thumbnailEpoch: state.thumbnailEpoch + 1,
+      thumbnailPending: 0,
+      thumbnailLoaded: 0,
+      thumbnailErrors: 0,
+    }))
   },
 }))
 

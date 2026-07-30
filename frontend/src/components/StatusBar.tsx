@@ -15,6 +15,10 @@ export function StatusBar() {
     thumbnailErrors,
   } = useAppStore()
 
+  const totalThumbWork = thumbnailLoaded + thumbnailPending
+  const thumbPct =
+    totalThumbWork > 0 ? Math.min(100, (thumbnailLoaded / totalThumbWork) * 100) : 0
+
   return (
     <div className="fixed bottom-0 left-0 right-0 border-t border-border bg-background/95 backdrop-blur px-4 py-1.5 flex items-center justify-between text-xs text-muted-foreground z-40">
       <div className="flex items-center gap-4">
@@ -30,8 +34,19 @@ export function StatusBar() {
           <span className="text-destructive font-medium">删除中: {deleteProgress.toFixed(0)}%</span>
         )}
         {thumbnailPending > 0 && (
-          <span className="text-primary font-medium">
-            加载缩略图: {thumbnailLoaded} / {thumbnailLoaded + thumbnailPending}
+          <span
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+            className="text-primary font-medium inline-flex items-center gap-2"
+          >
+            <span className="w-20 h-1.5 rounded-full bg-muted overflow-hidden shrink-0">
+              <span
+                className="block h-full bg-primary transition-[width] duration-150"
+                style={{ width: `${thumbPct}%` }}
+              />
+            </span>
+            加载缩略图: {thumbnailLoaded} / {totalThumbWork}
             {thumbnailErrors > 0 ? ` (失败 ${thumbnailErrors})` : ''}
           </span>
         )}
