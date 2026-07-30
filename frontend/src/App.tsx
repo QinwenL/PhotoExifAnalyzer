@@ -18,6 +18,8 @@ function App() {
     viewMode,
     selectedImages,
     selectedDetailImage,
+    sortBy,
+    sortOrder,
     setSelectedDirectory,
     scanDirectory,
     deleteSelectedImages,
@@ -25,6 +27,8 @@ function App() {
     selectAllImages,
     clearSelection,
     setSelectedDetailImage,
+    setSortBy,
+    toggleSortOrder,
   } = useAppStore()
 
   // Delete key handler
@@ -143,6 +147,29 @@ function App() {
           <div className="flex items-center justify-between mb-4">
             <span className="text-sm text-muted-foreground">{filteredResults.length} 张图片</span>
             <div className="flex gap-2">
+              {/* Sort buttons */}
+              <div className="flex gap-1 border rounded">
+                {(['name', 'date', 'size', 'camera'] as const).map((field) => (
+                  <Button
+                    key={field}
+                    variant={sortBy === field ? 'default' : 'ghost'}
+                    size="sm"
+                    className="text-xs"
+                    onClick={() => setSortBy(field)}
+                  >
+                    {field === 'name' && '名称'}
+                    {field === 'date' && '日期'}
+                    {field === 'size' && '大小'}
+                    {field === 'camera' && '相机'}
+                    {sortBy === field && (sortOrder === 'asc' ? ' ↑' : ' ↓')}
+                  </Button>
+                ))}
+              </div>
+              <Button variant="outline" size="sm" onClick={toggleSortOrder}>
+                {sortOrder === 'asc' ? '升序' : '降序'}
+              </Button>
+              
+              {/* View mode buttons */}
               <Button
                 variant={viewMode === 'grid' ? 'default' : 'outline'}
                 size="sm"

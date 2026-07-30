@@ -91,6 +91,8 @@ interface AppState {
   selectedImages: Set<string>
   selectedDetailImage: ScanResult | null
   lastSelectedIndex: number | null
+  sortBy: 'name' | 'date' | 'size' | 'camera'
+  sortOrder: 'asc' | 'desc'
 
   // Actions
   setSelectedDirectory: (dir: string | null) => void
@@ -104,6 +106,8 @@ interface AppState {
   clearSelection: () => void
   setViewMode: (mode: 'grid' | 'list') => void
   setSelectedDetailImage: (result: ScanResult | null) => void
+  setSortBy: (field: 'name' | 'date' | 'size' | 'camera') => void
+  toggleSortOrder: () => void
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -121,6 +125,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   selectedImages: new Set(),
   selectedDetailImage: null,
   lastSelectedIndex: null,
+  sortBy: 'name',
+  sortOrder: 'asc',
 
   // Actions
   setSelectedDirectory: (dir) => set({ selectedDirectory: dir }),
@@ -229,4 +235,49 @@ export const useAppStore = create<AppState>((set, get) => ({
   setViewMode: (mode) => set({ viewMode: mode }),
 
   setSelectedDetailImage: (result) => set({ selectedDetailImage: result }),
+
+  setSortBy: (field) => {
+    const { filteredResults, sortOrder } = get()
+    const sorted = sortResults(filteredResults, field, sortOrder)
+    set({ sortBy: field, filteredResults: sorted })
+  },
+
+  toggleSortOrder: () => {
+    const { filteredResults, sortBy, sortOrder } = get()
+    const newOrder = sortOrder === 'asc' ? 'desc' : 'asc'
+    const sorted = sortResults(filteredResults, sortBy, newOrder)
+    set({ sortOrder: newOrder, filteredResults: sorted })
+  },
 }))
+
+// Helper function to sort results
+function sortResults(
+  results: ScanResult[],
+  sortBy: 'name' | 'date' | 'size' | 'camera',
+  order: 'asc' | 'desc'
+): ScanResult[] {
+  const sorted = [...results].sort((a, b) => {
+    let comparison = 0
+
+    switch (sortBy) {
+      case 'name':
+        comparison = a.path.localeCompare(b.path)
+        break
+      case 'date':
+        comparison = (a.exif.datetime_original || '').localeCompare(b.exif.datetime_original || '')
+        break
+      case 'size':
+        comparison = a.file_size - b.file_size
+        break
+      case 'camera':
+        const cameraA = a.exif.make && a.exif.model ? `${a.exif.make} ${a.exif.model}` : ''
+        const cameraB = b.exif.make && b.exif.model ? `${b.exif.make} ${b.exif.model}` : ''
+        comparison = cameraA.localeCompare(cameraB)
+        break
+    }
+
+    return order === 'asc' ? comparison : -comparison
+  })
+
+  return sorted
+}
