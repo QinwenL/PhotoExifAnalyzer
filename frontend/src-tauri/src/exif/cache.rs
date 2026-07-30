@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::time::UNIX_EPOCH;
 
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -215,6 +216,7 @@ fn get_modified_time(path: &Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use tempfile::TempDir;
 
     fn create_test_file(dir: &Path, name: &str) -> PathBuf {
