@@ -3,6 +3,7 @@ pub mod cache;
 pub mod heic;
 pub mod file_ops;
 pub mod parser;
+pub mod raw_scan;
 pub mod scanner;
 pub mod stats;
 pub mod thumbnail;

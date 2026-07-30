@@ -6,8 +6,9 @@ use std::sync::{Arc, Mutex};
 use exif::cache::ExifCache;
 use exif::scanner::{scan_directory_with_cache, ScanResult};
 use exif::stats::{
-    calculate_camera_stats, calculate_focal_length_stats, calculate_lens_stats,
-    filter_results, CameraStats, FilterCriteria, FocalLengthStats, LensStats,
+    calculate_all_stats, calculate_camera_stats, calculate_focal_length_stats,
+    calculate_lens_stats, filter_results, AllStats, CameraStats, FilterCriteria,
+    FocalLengthStats, LensStats,
 };
 use serde::Serialize;
 use exif::file_ops::delete_file;
@@ -61,9 +62,14 @@ async fn scan_images_with_progress(
     // Use the global EXIF cache — dramatically reduces disk I/O on repeat scans
     let cache = EXIF_CACHE.as_ref().cloned();
 
-    // Remove dead entries before scanning
-    if let Some(cache) = EXIF_CACHE.as_ref() {
-        let _ = cache.lock().unwrap().cleanup();
+    // Kick off cache cleanup in a BACKGROUND thread — do NOT block the scan
+    // from starting. Previously `cleanup()` was called synchronously here,
+    // which for 10k+ cache entries meant 10k+ `path.exists()` syscalls before
+    // a single file was scanned, producing the "stuck at 0%" feeling.
+    if let Some(cache_arc) = EXIF_CACHE.as_ref().cloned() {
+        std::thread::spawn(move || {
+            let _ = cache_arc.lock().unwrap().cleanup();
+        });
     }
 
     // Run the blocking scan on a background thread so the Tauri main thread
@@ -74,9 +80,13 @@ async fn scan_images_with_progress(
             &dir,
             recursive,
             cache,
-            move |pct| {
+            // Throttle progress emissions: wrap the raw window.emit in a
+            // rate-limited layer so we don't cross the Tauri IPC boundary
+            // once per file (10k files = 10k IPC calls = significant lag).
+            // The wrapper guarantees a final 100% emit.
+            throttled_progress(move |pct| {
                 let _ = window.emit("scan_progress", pct);
-            },
+            }),
             move || *cancelled.lock().unwrap(),
         )
     })
@@ -84,6 +94,50 @@ async fn scan_images_with_progress(
     .map_err(|e| format!("Scan task failed: {}", e))?;
 
     Ok(result)
+}
+
+/// Wrap a progress callback with a ~100ms emission throttle.
+///
+/// Guarantees:
+///  - The very first call (0%) always passes through immediately.
+///  - The final call (100%) always passes through immediately.
+///  - Intermediate calls pass through at most once every MIN_PROGRESS_INTERVAL_MS,
+///    dropping the "stale" percentage values that nobody will see anyway.
+///
+/// Without this, 10k cached files produce 10k `window.emit` IPC calls, which
+/// floods the webview event loop and makes the scan *appear* slow even though
+/// the backend work finishes quickly.
+fn throttled_progress<F: Fn(f64) + Send + Sync + 'static>(
+    callback: F,
+) -> impl Fn(f64) + Send + Sync + 'static {
+    const MIN_PROGRESS_INTERVAL_MS: u128 = 100;
+    let last_emit = Arc::new(Mutex::new(
+        std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(
+                MIN_PROGRESS_INTERVAL_MS as u64,
+            ))
+            .unwrap_or_else(std::time::Instant::now),
+    ));
+
+    move |pct| {
+        let should_emit = {
+            let mut guard = last_emit.lock().unwrap();
+            let now = std::time::Instant::now();
+            // Always emit 0% (first call), 100% (final call), or if enough
+            // wall-clock time has elapsed since the last emission.
+            if pct <= 0.0 || pct >= 100.0
+                || now.duration_since(*guard).as_millis() >= MIN_PROGRESS_INTERVAL_MS
+            {
+                *guard = now;
+                true
+            } else {
+                false
+            }
+        };
+        if should_emit {
+            callback(pct);
+        }
+    }
 }
 
 #[tauri::command]
@@ -109,6 +163,20 @@ fn get_focal_length_stats(results: Vec<ScanResult>) -> FocalLengthStats {
 #[tauri::command]
 fn filter_images(results: Vec<ScanResult>, criteria: FilterCriteria) -> Vec<ScanResult> {
     filter_results(&results, &criteria)
+}
+
+/// Compute all three statistic groups (camera / lens / focal length) in a
+/// SINGLE command invocation.
+///
+/// The previous frontend code called `get_camera_stats`, `get_lens_stats`,
+/// and `get_focal_length_stats` as THREE separate `invoke()` calls. Each
+/// call serialized the full `results` array (potentially thousands of
+/// entries) across the Tauri IPC boundary, triplicating the wire cost. This
+/// merged command ships the array once and computes all three stats in a
+/// single pass over the data inside `calculate_all_stats`.
+#[tauri::command]
+fn get_all_stats(results: Vec<ScanResult>) -> AllStats {
+    calculate_all_stats(&results)
 }
 
 /// Asynchronously clean up cached data for deleted files.
@@ -264,6 +332,7 @@ pub fn run() {
             get_camera_stats,
             get_lens_stats,
             get_focal_length_stats,
+            get_all_stats,
             filter_images,
             delete_image,
             delete_images_with_progress,

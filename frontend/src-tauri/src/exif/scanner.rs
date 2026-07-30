@@ -133,7 +133,16 @@ pub fn scan_directory_with_cache<P: AsRef<Path>>(
 
     let total_files = image_paths.len();
     let progress = Arc::new(RwLock::new(ScanProgress::new(total_files)));
-    let results = Arc::new(Mutex::new(Vec::new()));
+    let results = Arc::new(Mutex::new(Vec::with_capacity(total_files)));
+
+    // Collect cache-miss EXIF payloads per-thread via a thread-safe collector
+    // so we can do a SINGLE bulk SQLite INSERT after the parallel parse
+    // completes. Previously each thread did its own `INSERT OR REPLACE` under
+    // the cache Mutex, producing one implicit SQLite transaction per file
+    // (each paying a full fsync cost). Accumulating + bulk-inserting drops
+    // that to one fsync total.
+    let pending_cache_writes: Arc<Mutex<Vec<(String, u64, String)>>> =
+        Arc::new(Mutex::new(Vec::new()));
 
     // Build a limited thread pool to avoid disk I/O contention.
     // When cache is populated, most lookups are fast SQLite reads;
@@ -144,13 +153,19 @@ pub fn scan_directory_with_cache<P: AsRef<Path>>(
         .expect("Failed to create I/O thread pool");
 
     let cache_clone = cache.clone();
+    let pending_clone = Arc::clone(&pending_cache_writes);
     pool.install(|| {
         image_paths.par_iter().for_each(|path| {
             if cancel_check() {
                 return;
             }
 
-            let result = process_image_with_cache(path, cache_clone.as_ref());
+            let (result, pending_write) =
+                process_image_with_cache(path, cache_clone.as_ref());
+
+            if let Some(pw) = pending_write {
+                pending_clone.lock().unwrap().push(pw);
+            }
 
             results.lock().unwrap().push(result);
 
@@ -164,6 +179,18 @@ pub fn scan_directory_with_cache<P: AsRef<Path>>(
         return Vec::new();
     }
 
+    // Phase 3: single bulk-insert of every cache-miss EXIF row into SQLite.
+    // This moves the write transaction off the hot per-file parallel path.
+    if let Some(cache) = cache {
+        let pending = match Arc::try_unwrap(pending_cache_writes) {
+            Ok(mutex) => mutex.into_inner().unwrap(),
+            Err(arc) => arc.lock().unwrap().clone(),
+        };
+        if !pending.is_empty() {
+            let _ = cache.lock().unwrap().bulk_insert(&pending);
+        }
+    }
+
     match Arc::try_unwrap(results) {
         Ok(mutex) => mutex.into_inner().unwrap(),
         Err(arc) => arc.lock().unwrap().clone(),
@@ -173,22 +200,48 @@ pub fn scan_directory_with_cache<P: AsRef<Path>>(
 /// Process a single image, using cache if available.
 ///
 /// Cache hit: returns cached EXIF data without reading the file.
-/// Cache miss: parses EXIF from disk, then stores result in cache.
-fn process_image_with_cache(path: &Path, cache: Option<&Arc<Mutex<ExifCache>>>) -> ScanResult {
-    let file_size = path
-        .metadata()
-        .map(|m| m.len())
-        .unwrap_or(0);
+/// Cache miss: parses EXIF from disk, then returns a serialized pending
+/// cache-write payload (path_str, mtime, exif_json) that the caller will
+/// bulk-insert in a single SQL transaction after all parallel work is done.
+///
+/// This signature differs from the previous `process_image_with_cache` in
+/// two key performance-critical ways:
+///   1. `path.metadata()` is called ONCE and the result is reused for both
+///      `file_size` and cache mtime validation (previously done 2–3x/file).
+///   2. Successful cache-miss parses are NOT individually written via the
+///      Mutex. Instead a `PendingCacheWrite` tuple is returned to the outer
+///      driver which does one `bulk_insert` transaction at the end.
+fn process_image_with_cache(
+    path: &Path,
+    cache: Option<&Arc<Mutex<ExifCache>>>,
+) -> (ScanResult, Option<(String, u64, String)>) {
+    // One metadata syscall per file — extract both size and mtime.
+    let (file_size, modified_time) = match path.metadata() {
+        Ok(meta) => {
+            let size = meta.len();
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs());
+            (size, mtime)
+        }
+        Err(_) => (0u64, None),
+    };
 
-    // 1. Check cache (fast SQLite lookup under mutex)
+    // 1. Check cache (fast SQLite lookup under mutex), passing the
+    //    pre-read mtime so ExifCache::get doesn't stat() the file again.
     if let Some(cache) = cache {
-        if let Some(cached_exif) = cache.lock().unwrap().get(path) {
-            return ScanResult {
-                path: path.to_path_buf(),
-                exif: cached_exif,
-                file_size,
-                error: None,
-            };
+        if let Some(cached_exif) = cache.lock().unwrap().get(path, modified_time) {
+            return (
+                ScanResult {
+                    path: path.to_path_buf(),
+                    exif: cached_exif,
+                    file_size,
+                    error: None,
+                },
+                None,
+            );
         }
     }
 
@@ -198,19 +251,30 @@ fn process_image_with_cache(path: &Path, cache: Option<&Arc<Mutex<ExifCache>>>) 
         Err(e) => (ExifData::new(), Some(e)),
     };
 
-    // 3. Store successful parse results in cache
-    if let Some(cache) = cache {
-        if error.is_none() {
-            let _ = cache.lock().unwrap().set(path, &exif);
+    // 3. Successful parse: pre-serialize outside the cache Mutex and return
+    //    to caller for bulk-insert. We only produce the pending-write tuple
+    //    when `modified_time` is known (otherwise cache validation can't
+    //    work reliably and it's better to skip caching this entry).
+    let pending_write = match (error.is_none(), cache.is_some(), modified_time) {
+        (true, true, Some(mtime)) => {
+            let path_str = path.to_string_lossy().to_string();
+            match serde_json::to_string(&exif) {
+                Ok(exif_json) => Some((path_str, mtime, exif_json)),
+                Err(_) => None,
+            }
         }
-    }
+        _ => None,
+    };
 
-    ScanResult {
-        path: path.to_path_buf(),
-        exif,
-        file_size,
-        error,
-    }
+    (
+        ScanResult {
+            path: path.to_path_buf(),
+            exif,
+            file_size,
+            error,
+        },
+        pending_write,
+    )
 }
 
 pub fn is_image_file<P: AsRef<Path>>(path: P) -> bool {
@@ -378,7 +442,7 @@ mod tests {
             focal_length: Some(50.0),
             ..Default::default()
         };
-        cache.set(&image_path, &test_exif).unwrap();
+        cache.set(&image_path, &test_exif, None).unwrap();
 
         // Scan with cache — should return cached EXIF without disk parsing
         let cache = Arc::new(Mutex::new(cache));
@@ -450,7 +514,7 @@ mod tests {
             make: Some("Canon".to_string()),
             ..Default::default()
         };
-        cache.set(&image_path, &test_exif).unwrap();
+        cache.set(&image_path, &test_exif, None).unwrap();
 
         let cache = Arc::new(Mutex::new(cache));
         let results = scan_directory_with_cache(

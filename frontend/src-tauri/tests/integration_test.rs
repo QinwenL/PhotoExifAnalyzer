@@ -171,13 +171,13 @@ fn test_cache_operations() {
     let path = &results[0].path;
     let exif_data = results[0].exif.clone();
     
-    cache.set(path, &exif_data).unwrap();
-    let cached = cache.get(path);
+    cache.set(path, &exif_data, None).unwrap();
+    let cached = cache.get(path, None);
     assert!(cached.is_some());
     
     // Remove
     cache.remove(path).unwrap();
-    let cached = cache.get(path);
+    let cached = cache.get(path, None);
     assert!(cached.is_none());
 }
 
@@ -191,8 +191,8 @@ fn test_cache_cleanup_removes_dead_entries() {
 
     // Pre-populate cache
     let exif_data = exif::ExifData::default();
-    cache.set(&path, &exif_data).unwrap();
-    assert!(cache.get(&path).is_some());
+    cache.set(&path, &exif_data, None).unwrap();
+    assert!(cache.get(&path, None).is_some());
 
     // Delete the file from disk
     fs::remove_file(&path).unwrap();
@@ -203,7 +203,7 @@ fn test_cache_cleanup_removes_dead_entries() {
     assert_eq!(removed, 1);
 
     // Cache should now be empty
-    assert!(cache.get(&path).is_none());
+    assert!(cache.get(&path, None).is_none());
     let stats = cache.stats();
     assert_eq!(stats.total_entries, 0);
 }

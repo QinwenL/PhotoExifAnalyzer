@@ -191,6 +191,133 @@ pub fn calculate_focal_length_stats(results: &[ScanResult]) -> FocalLengthStats 
     }
 }
 
+/// All three statistic groups bundled in one struct.
+///
+/// Returned from `calculate_all_stats` and the `get_all_stats` Tauri command
+/// so the frontend can request every statistic in a SINGLE `invoke()` call
+/// instead of three separate ones. This avoids triplicating the IPC cost of
+/// serializing the full `scanResults` array, which is the main bottleneck in
+/// the "stats hang at 100% scan complete" symptom.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AllStats {
+    pub cameras: CameraStats,
+    pub lenses: LensStats,
+    pub focal_length: FocalLengthStats,
+}
+
+/// Compute all three statistic groups in a single pass over `results`.
+///
+/// The previous code did three separate `.for_each` / map passes (via the
+/// three `calculate_*_stats` functions). This single-pass version visits each
+/// ScanResult exactly once and updates all three counters simultaneously,
+/// which also plays better with CPU cache for very large result sets.
+pub fn calculate_all_stats(results: &[ScanResult]) -> AllStats {
+    let mut camera_counts: HashMap<String, usize> = HashMap::new();
+    let mut lens_counts: HashMap<String, usize> = HashMap::new();
+    let focal_ranges = [
+        ("Ultra Wide <14mm", 0.0, 14.0),
+        ("Wide 14-24mm", 14.0, 24.0),
+        ("Standard 24-50mm", 24.0, 50.0),
+        ("Medium Tele 50-100mm", 50.0, 100.0),
+        ("Tele 100-200mm", 100.0, 200.0),
+        ("Super Tele >200mm", 200.0, 1000.0),
+    ];
+    let mut focal_counts: HashMap<String, (f64, f64, usize)> = HashMap::new();
+
+    for result in results {
+        // Camera bucket (only when `make` is present — matches
+        // calculate_camera_stats historical behavior)
+        if result.exif.make.is_some() {
+            if let Some(name) = result.exif.camera_name() {
+                *camera_counts.entry(name).or_insert(0) += 1;
+            }
+        }
+
+        // Lens bucket
+        if let Some(ref lens) = result.exif.lens_model {
+            *lens_counts.entry(lens.clone()).or_insert(0) += 1;
+        }
+
+        // Focal range bucket
+        if let Some(focal) = result.exif.focal_length {
+            for (label, min, max) in &focal_ranges {
+                if focal >= *min && focal < *max {
+                    let entry = focal_counts
+                        .entry((*label).to_string())
+                        .or_insert((*min, *max, 0));
+                    entry.2 += 1;
+                    break;
+                }
+            }
+        }
+    }
+
+    // --- Assemble camera stats ---
+    let camera_total: usize = camera_counts.values().sum();
+    let mut cameras: Vec<StatItem> = camera_counts
+        .into_iter()
+        .map(|(name, count)| StatItem {
+            name,
+            count,
+            percentage: if camera_total > 0 {
+                (count as f64 / camera_total as f64) * 100.0
+            } else {
+                0.0
+            },
+        })
+        .collect();
+    cameras.sort_by_key(|b| std::cmp::Reverse(b.count));
+
+    // --- Assemble lens stats ---
+    let lens_total: usize = lens_counts.values().sum();
+    let mut lenses: Vec<StatItem> = lens_counts
+        .into_iter()
+        .map(|(name, count)| StatItem {
+            name,
+            count,
+            percentage: if lens_total > 0 {
+                (count as f64 / lens_total as f64) * 100.0
+            } else {
+                0.0
+            },
+        })
+        .collect();
+    lenses.sort_by_key(|b| std::cmp::Reverse(b.count));
+
+    // --- Assemble focal length stats ---
+    let focal_total: usize = focal_counts.values().map(|(_, _, c)| c).sum();
+    let mut ranges: Vec<FocalRange> = focal_counts
+        .into_iter()
+        .map(|(label, (min, max, count))| FocalRange {
+            label,
+            min,
+            max,
+            count,
+            percentage: if focal_total > 0 {
+                (count as f64 / focal_total as f64) * 100.0
+            } else {
+                0.0
+            },
+        })
+        .collect();
+    ranges.sort_by(|a, b| a.min.partial_cmp(&b.min).unwrap_or(std::cmp::Ordering::Equal));
+
+    AllStats {
+        cameras: CameraStats {
+            cameras,
+            total: camera_total,
+        },
+        lenses: LensStats {
+            lenses,
+            total: lens_total,
+        },
+        focal_length: FocalLengthStats {
+            ranges,
+            total: focal_total,
+        },
+    }
+}
+
 /// Filter scan results based on criteria
 pub fn filter_results(results: &[ScanResult], criteria: &FilterCriteria) -> Vec<ScanResult> {
     results

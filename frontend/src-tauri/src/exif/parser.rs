@@ -12,12 +12,36 @@ use super::ExifData;
 /// or thumbnail-sized and tend to lack the APP1 EXIF segment anyway.
 const MIN_RAW_PREVIEW_BYTES: usize = 200;
 
+/// Canon CR3 files use the ISO BMFF (MP4) container format. EXIF metadata
+/// is stored inside `uuid` boxes whose UUID is the Canon TIFF metadata ID.
+/// When found, these boxes contain a raw TIFF structure that kamadak-exif
+/// can parse directly, bypassing the heuristic embedded-JPEG scan entirely.
+///
+/// UUID bytes (16) for Canon CMT1 (TIFF EXIF metadata) box:
+///   EA492F5B-0C5E-4EFB-A6B4-0CBA9E4CB7A8
+const CR3_CMT1_UUID: [u8; 16] = [
+    0xEA, 0x49, 0x2F, 0x5B, 0x0C, 0x5E, 0x4E, 0xFB,
+    0xA6, 0xB4, 0x0C, 0xBA, 0x9E, 0x4C, 0xB7, 0xA8,
+];
+
 /// Parse EXIF data from an image file
 pub fn parse_exif<P: AsRef<Path>>(path: P) -> Result<ExifData, String> {
     let path = path.as_ref();
 
     if !path.exists() {
         return Err(format!("File not found: {}", path.display()));
+    }
+
+    // Canon CR3 is an ISO BMFF container — its EXIF lives in Canon-specific
+    // `uuid` boxes (CMT1) as a TIFF payload. Try the structured box-scan
+    // first because it's more reliable than byte-level SOI hunting, then
+    // fall back to the generic embedded-JPEG path for older TIFF-based RAW.
+    if is_cr3_extension(path) {
+        if let Ok(data) = parse_cr3_exif_via_bmff(path) {
+            if !data.is_empty() {
+                return Ok(data);
+            }
+        }
     }
 
     // RAW files (CR2/NEF/ARW/DNG/...) are TIFF-based containers that
@@ -37,6 +61,182 @@ pub fn parse_exif<P: AsRef<Path>>(path: P) -> Result<ExifData, String> {
         .map_err(|e| format!("Failed to read EXIF: {}", e))?;
 
     Ok(exif_to_data(&exif))
+}
+
+fn is_cr3_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("cr3"))
+        .unwrap_or(false)
+}
+
+/// ISO BMFF box header: [4 bytes size][4 bytes type] — size may be 1
+/// (extended 64-bit size follows header) or 0 (extends to EOF).
+#[allow(dead_code)]
+struct BmffBox {
+    header_start: usize,
+    data_start: usize,
+    data_end: usize,
+    box_type: [u8; 4],
+}
+
+/// Scan ISO BMFF bytes for Canon CMT1 `uuid` boxes containing TIFF EXIF
+/// payload, and parse the first such payload via kamadak-exif.
+///
+/// Walks `moov`, `trak`, `mdia`, `minf`, `stbl`, `udta`, `meta`, `iloc`
+/// and any other container boxes recursively. Errors are swallowed so the
+/// caller can fall back to the generic RAW preview scan; only explicit
+/// EXIF-read failures surface as `Err`.
+fn parse_cr3_exif_via_bmff(path: &Path) -> Result<ExifData, String> {
+    let file_bytes = std::fs::read(path).map_err(|e| format!("Failed to read CR3 file: {}", e))?;
+
+    // Validate ftyp signature before committing to a BMFF scan.
+    if file_bytes.len() < 12
+        || &file_bytes[4..8] != b"ftyp"
+    {
+        return Err("Not a valid ISO BMFF container (missing ftyp box)".to_string());
+    }
+
+    let tiff_payloads = find_canon_tiff_payloads(&file_bytes);
+    if tiff_payloads.is_empty() {
+        return Err("No Canon CMT1 uuid box found in CR3; falling back to preview scan".to_string());
+    }
+
+    let mut last_err: Option<String> = None;
+    for tiff_bytes in tiff_payloads {
+        let cursor = std::io::Cursor::new(tiff_bytes);
+        let mut bufreader = BufReader::new(cursor);
+        match exif::Reader::new().read_from_container(&mut bufreader) {
+            Ok(exif) => {
+                let data = exif_to_data(&exif);
+                if !data.is_empty() {
+                    return Ok(data);
+                }
+            }
+            Err(e) => last_err = Some(format!("Failed to read TIFF from CR3 CMT1 box: {}", e)),
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| {
+        "CMT1 boxes found but contained no usable EXIF data; falling back".to_string()
+    }))
+}
+
+/// Recursively walk the ISO BMFF boxes in `data` and return every byte slice
+/// that corresponds to the payload of a Canon CMT1 `uuid` box.
+fn find_canon_tiff_payloads(data: &[u8]) -> Vec<&[u8]> {
+    let mut results = Vec::new();
+    let mut boxes = Vec::new();
+    if let Some(b) = read_boxes_in_range(data, 0, data.len()) {
+        boxes = b;
+    }
+
+    // BFS through container boxes
+    while let Some(b) = boxes.pop() {
+        if &b.box_type == b"uuid" {
+            if b.data_end.saturating_sub(b.data_start) >= 16 {
+                let uuid_bytes = &data[b.data_start..b.data_start + 16];
+                if uuid_bytes == CR3_CMT1_UUID {
+                    let payload_start = b.data_start + 16;
+                    if payload_start < b.data_end {
+                        results.push(&data[payload_start..b.data_end]);
+                    }
+                }
+            }
+            continue;
+        }
+        // Container boxes: descend into their children. The standard BMFF
+        // containers that can carry uuid boxes are:
+        //   moov, trak, mdia, minf, stbl, udta, meta, dinf, stsd
+        let is_container = matches!(
+            &b.box_type,
+            b"moov" | b"trak" | b"mdia" | b"minf" | b"stbl" | b"udta"
+                | b"meta" | b"dinf" | b"stsd" | b"iinf"
+        );
+        if is_container {
+            // `meta` box has an extra 4-byte version/flags sub-header after
+            // the box type that children must skip over.
+            let child_start = if &b.box_type == b"meta" {
+                b.data_start.saturating_add(4)
+            } else {
+                b.data_start
+            };
+            if let Some(children) = read_boxes_in_range(data, child_start, b.data_end) {
+                boxes.extend(children);
+            }
+        }
+    }
+
+    results
+}
+
+/// Read all sibling ISO BMFF boxes within `[start, end)` of `data`.
+/// Returns `None` if the range is malformed (not a single box is decodable).
+fn read_boxes_in_range(data: &[u8], start: usize, end: usize) -> Option<Vec<BmffBox>> {
+    let mut pos = start;
+    let mut out = Vec::new();
+    let end = end.min(data.len());
+    while pos + 8 <= end {
+        let size_32 = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+        let mut box_type = [0u8; 4];
+        box_type.copy_from_slice(&data[pos + 4..pos + 8]);
+
+        let header_size: usize;
+        let body_size: usize;
+
+        match size_32 {
+            1 => {
+                // Extended 64-bit size immediately follows the 8-byte header.
+                if pos + 16 > end {
+                    break;
+                }
+                header_size = 16;
+                let size_64 = u64::from_be_bytes([
+                    data[pos + 8],
+                    data[pos + 9],
+                    data[pos + 10],
+                    data[pos + 11],
+                    data[pos + 12],
+                    data[pos + 13],
+                    data[pos + 14],
+                    data[pos + 15],
+                ]);
+                body_size = (size_64 as usize).checked_sub(header_size)?;
+            }
+            0 => {
+                // Box extends to EOF.
+                header_size = 8;
+                body_size = end.checked_sub(pos + header_size)?;
+            }
+            n if n >= 8 => {
+                header_size = 8;
+                body_size = n - header_size;
+            }
+            _ => break, // Invalid box; stop scanning this level.
+        }
+
+        let data_start = pos + header_size;
+        let data_end = (data_start + body_size).min(end);
+
+        out.push(BmffBox {
+            header_start: pos,
+            data_start,
+            data_end,
+            box_type,
+        });
+
+        // Advance to next sibling box header.
+        pos = if size_32 == 0 {
+            end // 0-size is always the last box in the range.
+        } else {
+            data_end
+        };
+
+        if pos >= end {
+            break;
+        }
+    }
+    Some(out)
 }
 
 /// Parse EXIF from a RAW file by extracting its largest embedded JPEG preview
@@ -370,5 +570,199 @@ mod tests {
         let result = parse_exif(&raw_path);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("No embedded JPEG"));
+    }
+
+    // ---- CR3 ISO BMFF parser tests ----
+
+    fn u32_be(v: u32) -> [u8; 4] {
+        v.to_be_bytes()
+    }
+
+    /// Build an ISO BMFF box: [size:4][type:4][payload]
+    fn bmff_box(box_type: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let size: u32 = 8 + payload.len() as u32;
+        let mut out = Vec::with_capacity(size as usize);
+        out.extend_from_slice(&u32_be(size));
+        out.extend_from_slice(box_type);
+        out.extend_from_slice(payload);
+        out
+    }
+
+    /// Build a minimal fake CR3 file structure:
+    ///   [ftyp box] + [moov -> udta -> uuid(CMT1) -> TIFF-like payload]
+    ///
+    /// The UUID+payload bytes inside uuid-box directly are what
+    /// `find_canon_tiff_payloads` extracts.
+    fn create_fake_cr3(dir: &Path, name: &str, tiff_inside_cmt1: &[u8]) -> PathBuf {
+        let path = dir.join(name);
+
+        // ftyp box: brand=crx + minor_ver + compatible_brands
+        let mut ftyp_payload = Vec::new();
+        ftyp_payload.extend_from_slice(b"crx "); // major brand: Canon CR3
+        ftyp_payload.extend_from_slice(&u32_be(0)); // minor version
+        ftyp_payload.extend_from_slice(b"crx "); // compatible brand 1
+        ftyp_payload.extend_from_slice(b"isom"); // compatible brand 2
+        let ftyp_box = bmff_box(b"ftyp", &ftyp_payload);
+
+        // uuid box: [16-byte UUID][TIFF payload]
+        let mut uuid_payload = Vec::new();
+        uuid_payload.extend_from_slice(&CR3_CMT1_UUID);
+        uuid_payload.extend_from_slice(tiff_inside_cmt1);
+        let uuid_box = bmff_box(b"uuid", &uuid_payload);
+
+        // udta container that wraps the uuid box
+        let udta_box = bmff_box(b"udta", &uuid_box);
+
+        // moov container that wraps udta
+        let moov_box = bmff_box(b"moov", &udta_box);
+
+        // Concatenate to form the whole file
+        let mut file_bytes = ftyp_box;
+        file_bytes.extend(moov_box);
+        // Make the file large enough so preview fallback would trigger a
+        // "no SOI markers" error instead of a read error if BMFF path fails.
+        file_bytes.extend(vec![0u8; 1024]);
+
+        std::fs::write(&path, &file_bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn test_is_cr3_extension_case_insensitive() {
+        assert!(is_cr3_extension(Path::new("photo.cr3")));
+        assert!(is_cr3_extension(Path::new("photo.CR3")));
+        assert!(is_cr3_extension(Path::new("photo.Cr3")));
+        assert!(!is_cr3_extension(Path::new("photo.cr2")));
+        assert!(!is_cr3_extension(Path::new("photo.jpg")));
+        assert!(!is_cr3_extension(Path::new("photo")));
+    }
+
+    #[test]
+    fn test_cr3_no_ftyp_rejects_bmff_scan() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("broken.cr3");
+        // All-zero file of reasonable size: not a valid BMFF, no ftyp.
+        std::fs::write(&path, vec![0u8; 2048]).unwrap();
+        // Should fall through the BMFF path (no ftyp) and end up at the
+        // generic RAW preview scan, which will report "No embedded JPEG".
+        let result = parse_exif(&path);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("No embedded JPEG"),
+            "expected generic RAW fallback, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_cr3_cmt1_uuid_box_found() {
+        // A TIFF-byte blob that is NOT a valid TIFF → parse_exif will
+        // attempt the BMFF path, find the CMT1 uuid box, try to parse its
+        // payload as TIFF, fail, then fall back to generic RAW preview
+        // scan (no JPEG). The key behaviour is that the code DOES reach the
+        // uuid-box parsing and doesn't panic on malformed TIFF payload.
+        let temp_dir = TempDir::new().unwrap();
+        let fake_tiff: Vec<u8> = vec![0xAA, 0xBB, 0xCC, 0xDD, 0x11, 0x22, 0x33, 0x44];
+        let cr3 = create_fake_cr3(temp_dir.path(), "test.cr3", &fake_tiff);
+        let result = parse_exif(&cr3);
+        assert!(
+            result.is_err(),
+            "Should error: uuid payload is not a real TIFF + no JPEG preview"
+        );
+    }
+
+    #[test]
+    fn test_cr3_extension_falls_back_to_preview_scan() {
+        // CR3 file with a ftyp box but NO uuid CMT1 box, and an embedded
+        // JPEG SOI+EOI blob (no EXIF) should fall through both the BMFF
+        // path (no CMT1) and end up at the RAW preview scan (error about
+        // EXIF read).
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("fallback.cr3");
+
+        let mut ftyp_payload = Vec::new();
+        ftyp_payload.extend_from_slice(b"crx ");
+        ftyp_payload.extend_from_slice(&u32_be(0));
+        ftyp_payload.extend_from_slice(b"crx ");
+        let ftyp_box = bmff_box(b"ftyp", &ftyp_payload);
+
+        let mut file_bytes = ftyp_box;
+        // moov box with no uuid box inside
+        let moov_box = bmff_box(b"moov", &[]);
+        file_bytes.extend(moov_box);
+        // Append a small embedded JPEG (no EXIF) — parse_raw_exif will try
+        // to read EXIF from it and fail.
+        let small_jpeg = vec![0xFF, 0xD8]; // SOI
+        let padded = std::iter::repeat(0u8).take(300).collect::<Vec<_>>();
+        let mut jpeg = small_jpeg;
+        jpeg.extend(padded);
+        jpeg.push(0xFF);
+        jpeg.push(0xD9); // EOI
+        file_bytes.extend(jpeg);
+
+        std::fs::write(&path, &file_bytes).unwrap();
+        let result = parse_exif(&path);
+        assert!(result.is_err());
+        // Should come from RAW preview scan error path (mentions EXIF/RAW)
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("EXIF") || err.contains("RAW"),
+            "expected preview-scan error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_cr3_read_boxes_in_range_basic() {
+        // Two sibling boxes, 32-bit sizes.
+        let b1 = bmff_box(b"ftyp", b"AAAA");
+        let b2 = bmff_box(b"moov", b"BBBB");
+        let mut data = b1.clone();
+        data.extend(b2);
+        let boxes = read_boxes_in_range(&data, 0, data.len()).unwrap();
+        assert_eq!(boxes.len(), 2);
+        assert_eq!(&boxes[0].box_type, b"ftyp");
+        assert_eq!(&boxes[1].box_type, b"moov");
+        // Payload of box 0 starts at offset 8 and is 4 bytes.
+        assert_eq!(boxes[0].data_end - boxes[0].data_start, 4);
+    }
+
+    #[test]
+    fn test_cr3_find_canon_tiff_payloads() {
+        // Assemble a buffer that contains the CMT1 uuid box inside moov/udta
+        // and make sure find_canon_tiff_payloads picks it up.
+        let tiff_blob = b"this-will-be-the-tiff-payload";
+        let mut uuid_payload = Vec::new();
+        uuid_payload.extend_from_slice(&CR3_CMT1_UUID);
+        uuid_payload.extend_from_slice(tiff_blob);
+        let uuid_box = bmff_box(b"uuid", &uuid_payload);
+        let udta_box = bmff_box(b"udta", &uuid_box);
+        let moov_box = bmff_box(b"moov", &udta_box);
+
+        let mut ftyp_payload = Vec::new();
+        ftyp_payload.extend_from_slice(b"crx ");
+        ftyp_payload.extend_from_slice(&u32_be(0));
+        let ftyp_box = bmff_box(b"ftyp", &ftyp_payload);
+
+        let mut data = ftyp_box;
+        data.extend(moov_box);
+
+        let found = find_canon_tiff_payloads(&data);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0], &tiff_blob[..]);
+    }
+
+    #[test]
+    fn test_cr3_find_canon_tiff_payloads_ignores_other_uuids() {
+        // A uuid box with a non-CMT1 UUID must not be reported.
+        let other_uuid = [0x11u8; 16];
+        let mut other_uuid_payload = Vec::new();
+        other_uuid_payload.extend_from_slice(&other_uuid);
+        other_uuid_payload.extend_from_slice(b"not-canon");
+        let other_box = bmff_box(b"uuid", &other_uuid_payload);
+        let udta_box = bmff_box(b"udta", &other_box);
+        let moov_box = bmff_box(b"moov", &udta_box);
+
+        let found = find_canon_tiff_payloads(&moov_box);
+        assert!(found.is_empty());
     }
 }

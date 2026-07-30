@@ -85,6 +85,12 @@ export interface ExportImage {
   datetime: string | null
 }
 
+export interface AllStats {
+  cameras: CameraStats
+  lenses: LensStats
+  focal_length: FocalLengthStats
+}
+
 export interface ExportStatistics {
   cameras: CameraStats
   lenses: LensStats
@@ -244,13 +250,21 @@ export const useAppStore = create<AppState>((set, get) => ({
     const { scanResults } = get()
     if (scanResults.length === 0) return
 
-    Promise.all([
-      invoke<CameraStats>('get_camera_stats', { results: scanResults }),
-      invoke<LensStats>('get_lens_stats', { results: scanResults }),
-      invoke<FocalLengthStats>('get_focal_length_stats', { results: scanResults }),
-    ]).then(([cameraStats, lensStats, focalLengthStats]) => {
-      set({ cameraStats, lensStats, focalLengthStats })
-    })
+    // Single invoke across the Tauri IPC boundary: the full scanResults
+    // array is serialized and transmitted exactly ONCE, not three times as
+    // with the previous `Promise.all([get_camera_stats, get_lens_stats,
+    // get_focal_length_stats])` pattern. For large photo libraries this is
+    // the biggest win in the "scan completes to 100% then hangs forever
+    // while stats load" symptom.
+    invoke<AllStats>('get_all_stats', { results: scanResults }).then(
+      (all) => {
+        set({
+          cameraStats: all.cameras,
+          lensStats: all.lenses,
+          focalLengthStats: all.focal_length,
+        })
+      }
+    )
   },
 
   setFilterCriteria: (criteria) => set({ filterCriteria: criteria }),
