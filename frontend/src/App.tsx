@@ -35,8 +35,6 @@ function App() {
     isScanning,
     scanProgress,
     filteredResults,
-    scanResults,
-    selectedDirectory,
     cameraStats,
     lensStats,
     focalLengthStats,
@@ -60,7 +58,6 @@ function App() {
     exportToJSON,
     filterByCamera,
     filterByLens,
-    resetFilter,
   } = useAppStore()
 
   // Delete key handler
