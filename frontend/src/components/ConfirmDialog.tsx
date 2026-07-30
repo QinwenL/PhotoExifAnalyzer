@@ -1,4 +1,5 @@
 import { Button } from '@/components/ui/button'
+import { Thumbnail } from './Thumbnail'
 import { getFileName } from '@/lib/utils'
 import type { ScanResult } from '../store'
 
@@ -43,9 +44,7 @@ export function ConfirmDialog({
                   className="aspect-square bg-muted rounded flex items-center justify-center overflow-hidden"
                   title={getFileName(img.path)}
                 >
-                  <span className="text-[10px] text-muted-foreground truncate px-1">
-                    {getFileName(img.path)}
-                  </span>
+                  <Thumbnail path={img.path} className="w-full h-full" />
                 </div>
               ))}
             </div>
