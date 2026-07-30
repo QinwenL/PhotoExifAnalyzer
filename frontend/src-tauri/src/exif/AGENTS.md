@@ -19,14 +19,14 @@ exif/
 
 | 任务 | 位置 | 备注 |
 |------|------|------|
-| 修改 EXIF 字段 | `mod.rs:11-45` | `ExifData` 结构体 |
+| 修改 EXIF 字段 | `mod.rs` | `ExifData` 结构体（`camera_name()` 为相机名单一来源） |
 | 修改解析逻辑 | `parser.rs` | `parse_exif()` 函数 |
 | 修改扫描/并行 | `scanner.rs` | `scan_directory_with_cache()` |
 | 修改缓存 | `cache.rs` | `ExifCache` 类型 |
 | 修改统计 | `stats.rs` | `calculate_*_stats()` |
-| 修改过滤 | `stats.rs:60-78` | `FilterCriteria` 结构体 |
+| 修改过滤 | `stats.rs` | `FilterCriteria` 结构体 |
 | 修改删除 | `file_ops.rs` | `delete_file()` / `delete_files()` |
-| 修改缩略图 | `thumbnail.rs` | `get_image_base64()` |
+| 修改缩略图 | `thumbnail.rs` | `get_image_base64_cached()` |
 
 ## CONVENTIONS
 
@@ -36,8 +36,8 @@ exif/
 - **并行**：rayon `par_iter()`，4 线程限制
 - **进度回调**：`impl Fn(f64) + Send + Sync + 'static`
 - **取消检查**：`impl Fn() -> bool + Send + Sync + 'static`
+- **相机名**：`ExifData::camera_name()`（`mod.rs`）是 `make + model` 格式的单一来源，`stats.rs` 和 `lib.rs` 均调用它
 
 ## ANTI-PATTERNS
 
-- **相机名格式化重复**：`make + model` 在 stats.rs 和 lib.rs 中重复
 - **缓存失效由上层处理**：exif 模块自身不处理缓存失效，由 lib.rs 的 `cleanup_caches_async()` 负责
