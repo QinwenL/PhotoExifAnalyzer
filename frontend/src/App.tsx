@@ -29,6 +29,7 @@ function App() {
     setSelectedDetailImage,
     setSortBy,
     toggleSortOrder,
+    exportToJSON,
   } = useAppStore()
 
   // Delete key handler
@@ -191,6 +192,9 @@ function App() {
                   </Button>
                   <Button variant="outline" size="sm" onClick={clearSelection}>
                     取消选择
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={exportToJSON}>
+                    导出 JSON
                   </Button>
                 </>
               )}

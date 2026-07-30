@@ -108,6 +108,7 @@ interface AppState {
   setSelectedDetailImage: (result: ScanResult | null) => void
   setSortBy: (field: 'name' | 'date' | 'size' | 'camera') => void
   toggleSortOrder: () => void
+  exportToJSON: () => void
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -247,6 +248,39 @@ export const useAppStore = create<AppState>((set, get) => ({
     const newOrder = sortOrder === 'asc' ? 'desc' : 'asc'
     const sorted = sortResults(filteredResults, sortBy, newOrder)
     set({ sortOrder: newOrder, filteredResults: sorted })
+  },
+
+  exportToJSON: () => {
+    const { filteredResults, cameraStats, lensStats, focalLengthStats } = get()
+    const exportData = {
+      timestamp: new Date().toISOString(),
+      totalImages: filteredResults.length,
+      statistics: {
+        cameras: cameraStats,
+        lenses: lensStats,
+        focalLength: focalLengthStats,
+      },
+      images: filteredResults.map((r) => ({
+        path: r.path,
+        filename: r.path.split(/[/\\]/).pop(),
+        size: r.file_size,
+        camera: r.exif.make && r.exif.model ? `${r.exif.make} ${r.exif.model}` : null,
+        lens: r.exif.lens_model || null,
+        focalLength: r.exif.focal_length || null,
+        aperture: r.exif.aperture || null,
+        shutterSpeed: r.exif.exposure_time || null,
+        iso: r.exif.iso || null,
+        datetime: r.exif.datetime_original || null,
+      })),
+    }
+
+    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `exif-export-${new Date().toISOString().slice(0, 10)}.json`
+    a.click()
+    URL.revokeObjectURL(url)
   },
 }))
 
