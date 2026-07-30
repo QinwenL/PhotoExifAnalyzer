@@ -445,8 +445,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 }))
 
-// Helper function to sort results
-function sortResults(
+// Helper function to sort results.
+// Exported for unit testing — not part of the public store API.
+export function sortResults(
   results: ScanResult[],
   sortBy: 'name' | 'date' | 'size' | 'camera',
   order: 'asc' | 'desc'
