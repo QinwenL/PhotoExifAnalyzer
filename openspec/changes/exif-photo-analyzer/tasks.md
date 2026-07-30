@@ -77,6 +77,8 @@
 - [x] 5.1 添加 `rusqlite` 依赖
 - [x] 5.2 设计 SQLite 表结构（exif_cache, stats_cache）
   - **测试**：表创建成功
+  - **实际方案**：仅实现 `exif_cache` 表。`stats_cache` 标记为可选（design.md 已注明），
+    统计数据由 `stats.rs` 从 `ScanResult` 实时计算（毫秒级），无需额外缓存。
 - [x] 5.3 实现缓存读写操作
   - **测试**：读写 SQLite 数据
 - [x] 5.4 实现文件修改时间检查

@@ -31,7 +31,7 @@
 
 - **技术栈**：Tauri 1.x + Rust + React + TypeScript
 - **依赖**：
-  - 后端：`kamadak-exif`（EXIF 解析）、`rawloader`（RAW 支持）、`walkdir`（目录遍历）、`trash`（回收站）、`rayon`（并行）
+  - 后端：`kamadak-exif`（EXIF 解析）、`memmap2` + `memchr`（RAW 内嵌 JPEG preview 定位）、`walkdir`（目录遍历）、`trash`（回收站）、`rayon`（并行）、`rusqlite`（SQLite 缓存）
   - 前端：React、TailwindCSS、shadcn/ui、Recharts（图表）、@tanstack/react-virtual（虚拟滚动）
 - **系统要求**：Windows/macOS/Linux，需要安装 Tauri 预依赖
 - **性能目标**：10,000 张 JPEG < 5 秒完成扫描，RAW < 60 秒，界面 60fps 流畅

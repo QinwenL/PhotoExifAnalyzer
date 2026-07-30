@@ -53,19 +53,23 @@
 // 核心模块
 src-tauri/
 ├── src/
-│   ├── main.rs          // Tauri 入口
-│   ├── commands/        // Tauri commands
-│   │   ├── exif.rs      // EXIF 解析命令
-│   │   ├── gallery.rs   // 图片列表命令
-│   │   └── file.rs      // 文件操作命令
-│   ├── exif/            // EXIF 解析逻辑
-│   ├── scanner/         // 目录扫描器
-│   └── stats/           // 统计计算
+│   ├── main.rs          // Tauri 入口（Windows 子系统隐藏）
+│   ├── lib.rs           // 全部 Tauri commands + 全局状态 + 单元测试
+│   └── exif/            // EXIF 解析与相关逻辑
+│       ├── mod.rs       // ExifData 结构体 + camera_name()
+│       ├── parser.rs    // JPEG/TIFF/RAW EXIF 解析（kamadak-exif）
+│       ├── raw_scan.rs  // RAW 内嵌 JPEG preview 定位（memmap2 + memchr）
+│       ├── scanner.rs   // 目录扫描器（walkdir + rayon 并行）
+│       ├── stats.rs     // 统计计算 + AND/OR 过滤
+│       ├── cache.rs     // SQLite EXIF 缓存
+│       ├── thumbnail.rs // 缩略图生成
+│       ├── file_ops.rs  // 回收站删除
+│       └── heic.rs      // HEIC 支持（仅 Windows）
 ```
 
 **核心依赖**：
-- `kamadak-exif`：JPEG/TIFF EXIF 解析
-- `rawloader`：RAW 格式支持
+- `kamadak-exif`：JPEG/TIFF EXIF 解析（同时用于 RAW 内嵌 JPEG preview 的 EXIF 提取）
+- `memmap2` + `memchr`：RAW 文件零拷贝映射 + SIMD 加速的嵌入式 JPEG preview 定位（替代 `rawloader`，后者只解码像素不提取 EXIF）
 - `walkdir`：目录遍历
 - `rayon`：并行扫描
 - `trash`：回收站操作
@@ -143,9 +147,9 @@ src-tauri/
 |------|----------|--------|
 | JPEG | kamadak-exif 原生 | P0 |
 | TIFF | kamadak-exif 原生 | P0 |
-| RAW (CR2/NEF/ARW等) | rawloader / kamadak-exif 部分支持 | P0 |
+| RAW (CR2/NEF/ARW等) | 定位内嵌 JPEG preview 后用 kamadak-exif 解析 | P0 |
 | PNG | 部分 EXIF 支持 | P1 |
-| HEIC/HEIF | 需要额外库 | P2 |
+| HEIC/HEIF | 需要额外库（Windows 平台已实现） | P2 |
 
 ### 6. 删除功能实现
 
@@ -209,19 +213,24 @@ interface UIStore {
 ```sql
 -- EXIF 缓存表
 CREATE TABLE exif_cache (
-  file_path TEXT PRIMARY KEY,
-  file_modified INTEGER,
-  exif_data TEXT,  -- JSON 格式的 EXIF
-  thumbnail_path TEXT,
-  created_at INTEGER
+  path TEXT PRIMARY KEY,
+  modified_time INTEGER NOT NULL,
+  exif_json TEXT NOT NULL,           -- JSON 格式的 EXIF
+  version INTEGER NOT NULL,          -- 缓存版本号，schema 变化时自动重建
+  preview_offset INTEGER,            -- RAW 内嵌 JPEG preview 字节偏移
+  preview_length INTEGER             -- RAW 内嵌 JPEG preview 字节长度
 );
 
--- 统计缓存表（可选）
-CREATE TABLE stats_cache (
-  folder TEXT PRIMARY KEY,
-  stats_data TEXT,
-  updated_at INTEGER
-);
+CREATE INDEX idx_modified_time ON exif_cache(modified_time);
+CREATE INDEX idx_version ON exif_cache(version);
+
+-- 统计缓存表（可选，未实现）
+-- 统计数据由 stats.rs 从 ScanResult 实时计算（毫秒级），无需额外缓存。
+-- CREATE TABLE stats_cache (
+--   folder TEXT PRIMARY KEY,
+--   stats_data TEXT,
+--   updated_at INTEGER
+-- );
 ```
 
 优势：索引查询、原子事务、并发安全
@@ -299,8 +308,8 @@ if *cancel_rx.borrow() {
 ## Risks / Trade-offs
 
 ### 风险 1: RAW 格式兼容性
-**风险**：不同相机厂商 RAW 格式差异大，解析库可能不完全支持所有型号
-**缓解**：使用成熟的 `rawloader` crate，测试主流厂商（Canon/Nikon/Sony）格式
+**风险**：不同相机厂商 RAW 格式差异大，嵌入式 JPEG preview 位置/大小不一致
+**缓解**：用 `memmap2` + `memchr` 扫描 SOI/EOI 标记定位 preview，覆盖 Canon/Nikon/Sony 主流厂商；优先扫描前后 8MB 区间，未命中回退全文件扫描保证不漏
 
 ### 风险 2: 大量图片内存占用
 **风险**：10,000 张图片的缩略图可能占用较多内存
@@ -339,6 +348,6 @@ if *cancel_rx.borrow() {
 
 1. ~~RAW 格式支持~~ → 确认支持，P0 优先级
 2. ~~缩略图策略~~ → 混合方案（小图缓存 + 详情实时解码）
-3. ~~缓存存储~~ → JSON 文件
+3. ~~缓存存储~~ → SQLite（`rusqlite`，索引查询、原子事务、并发安全）
 4. ~~Tauri 版本~~ → 1.x 稳定版
 5. ~~UI 库~~ → shadcn/ui
