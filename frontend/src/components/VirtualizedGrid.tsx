@@ -13,7 +13,7 @@ export function VirtualizedGrid({ items, columns, renderItem }: VirtualizedGridP
 
   const rowCount = Math.ceil(items.length / columns)
 
-  // eslint-disable-next-line react-hooks/incompatible-library
+  // eslint-disable-next-line react-hooks/incompatible-library -- TanStack Virtual 返回的函数无法被 React Compiler 安全 memoize，此处允许跳过编译
   const virtualizer = useVirtualizer({
     count: rowCount,
     getScrollElement: () => parentRef.current,
@@ -65,7 +65,6 @@ interface VirtualizedListProps {
 export function VirtualizedList({ items, renderItem }: VirtualizedListProps) {
   const parentRef = useRef<HTMLDivElement>(null)
 
-  // eslint-disable-next-line react-hooks/incompatible-library
   const virtualizer = useVirtualizer({
     count: items.length,
     getScrollElement: () => parentRef.current,
