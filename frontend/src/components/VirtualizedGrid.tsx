@@ -13,6 +13,7 @@ export function VirtualizedGrid({ items, columns, renderItem }: VirtualizedGridP
 
   const rowCount = Math.ceil(items.length / columns)
 
+  // eslint-disable-next-line react-hooks/incompatible-library
   const virtualizer = useVirtualizer({
     count: rowCount,
     getScrollElement: () => parentRef.current,
@@ -45,7 +46,7 @@ export function VirtualizedGrid({ items, columns, renderItem }: VirtualizedGridP
                 transform: `translateY(${virtualRow.start}px)`,
               }}
             >
-              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-2 h-full">
+              <div className="grid gap-2 h-full" style={{ gridTemplateColumns: `repeat(${columns}, 1fr)` }}>
                 {rowItems.map((item, colIndex) => renderItem(item, startIndex + colIndex))}
               </div>
             </div>
@@ -64,6 +65,7 @@ interface VirtualizedListProps {
 export function VirtualizedList({ items, renderItem }: VirtualizedListProps) {
   const parentRef = useRef<HTMLDivElement>(null)
 
+  // eslint-disable-next-line react-hooks/incompatible-library
   const virtualizer = useVirtualizer({
     count: items.length,
     getScrollElement: () => parentRef.current,

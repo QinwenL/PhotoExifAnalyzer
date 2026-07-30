@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/tauri'
+import { listen } from '@tauri-apps/api/event'
 import { create } from 'zustand'
 
 // Types matching Rust backend
@@ -94,10 +95,13 @@ interface AppState {
   sortBy: 'name' | 'date' | 'size' | 'camera'
   sortOrder: 'asc' | 'desc'
   theme: 'light' | 'dark' | 'system'
+  detailMode: 'simple' | 'detailed'
 
   // Actions
   setSelectedDirectory: (dir: string | null) => void
   scanDirectory: (dir: string, recursive: boolean) => Promise<void>
+  scanDirectoryWithProgress: (dir: string, recursive: boolean) => Promise<void>
+  cancelScan: () => Promise<void>
   updateStatistics: () => void
   setFilterCriteria: (criteria: FilterCriteria) => void
   applyFilter: () => void
@@ -110,12 +114,18 @@ interface AppState {
   setSortBy: (field: 'name' | 'date' | 'size' | 'camera') => void
   toggleSortOrder: () => void
   setTheme: (theme: 'light' | 'dark' | 'system') => void
+  setDetailMode: (mode: 'simple' | 'detailed') => void
   exportToJSON: () => void
+  filterByCamera: (camera: string) => void
+  filterByLens: (lens: string) => void
+  resetFilter: () => void
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
   // Initial state
-  selectedDirectory: null,
+  selectedDirectory: (() => {
+    try { return localStorage.getItem('lastDirectory') } catch { return null }
+  })(),
   isScanning: false,
   scanProgress: 0,
   scanResults: [],
@@ -130,10 +140,18 @@ export const useAppStore = create<AppState>((set, get) => ({
   lastSelectedIndex: null,
   sortBy: 'name',
   sortOrder: 'asc',
-  theme: 'system',
+  theme: (() => {
+    try { return (localStorage.getItem('theme') as 'light' | 'dark' | 'system') || 'system' } catch { return 'system' }
+  })(),
+  detailMode: 'simple',
 
   // Actions
-  setSelectedDirectory: (dir) => set({ selectedDirectory: dir }),
+  setSelectedDirectory: (dir) => {
+    set({ selectedDirectory: dir })
+    if (dir) {
+      try { localStorage.setItem('lastDirectory', dir) } catch { /* ignore */ }
+    }
+  },
 
   scanDirectory: async (dir, recursive) => {
     set({ isScanning: true, scanProgress: 0 })
@@ -145,11 +163,41 @@ export const useAppStore = create<AppState>((set, get) => ({
         isScanning: false,
         scanProgress: 100,
       })
-      // Update statistics
       get().updateStatistics()
     } catch (error) {
       console.error('Scan failed:', error)
       set({ isScanning: false })
+    }
+  },
+
+  scanDirectoryWithProgress: async (dir, recursive) => {
+    set({ isScanning: true, scanProgress: 0 })
+    try {
+      const progressHandler = listen('scan_progress', (event) => {
+        set({ scanProgress: event.payload as number })
+      })
+
+      const results: ScanResult[] = await invoke('scan_images_with_progress', { dir, recursive })
+      await progressHandler
+      set({
+        scanResults: results,
+        filteredResults: results,
+        isScanning: false,
+        scanProgress: 100,
+      })
+      get().updateStatistics()
+    } catch (error) {
+      console.error('Scan failed:', error)
+      set({ isScanning: false })
+    }
+  },
+
+  cancelScan: async () => {
+    try {
+      await invoke('cancel_scan')
+      set({ isScanning: false, scanProgress: 0 })
+    } catch (error) {
+      console.error('Cancel scan failed:', error)
     }
   },
 
@@ -242,6 +290,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setTheme: (theme) => {
     set({ theme })
+    try { localStorage.setItem('theme', theme) } catch { /* ignore */ }
     // Apply theme to document
     const root = document.documentElement
     root.classList.remove('light', 'dark')
@@ -298,6 +347,31 @@ export const useAppStore = create<AppState>((set, get) => ({
     a.click()
     URL.revokeObjectURL(url)
   },
+
+  setDetailMode: (mode) => set({ detailMode: mode }),
+
+  filterByCamera: (camera) => {
+    const { scanResults } = get()
+    const criteria: FilterCriteria = { cameras: [camera], and_mode: false }
+    set({ filterCriteria: criteria })
+    invoke<ScanResult[]>('filter_images', { results: scanResults, criteria }).then(
+      (filtered) => set({ filteredResults: filtered })
+    )
+  },
+
+  filterByLens: (lens) => {
+    const { scanResults } = get()
+    const criteria: FilterCriteria = { lenses: [lens], and_mode: false }
+    set({ filterCriteria: criteria })
+    invoke<ScanResult[]>('filter_images', { results: scanResults, criteria }).then(
+      (filtered) => set({ filteredResults: filtered })
+    )
+  },
+
+  resetFilter: () => {
+    const { scanResults } = get()
+    set({ filterCriteria: { and_mode: false }, filteredResults: scanResults })
+  },
 }))
 
 // Helper function to sort results
@@ -319,11 +393,12 @@ function sortResults(
       case 'size':
         comparison = a.file_size - b.file_size
         break
-      case 'camera':
+      case 'camera': {
         const cameraA = a.exif.make && a.exif.model ? `${a.exif.make} ${a.exif.model}` : ''
         const cameraB = b.exif.make && b.exif.model ? `${b.exif.make} ${b.exif.model}` : ''
         comparison = cameraA.localeCompare(cameraB)
         break
+      }
     }
 
     return order === 'asc' ? comparison : -comparison

@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use rayon::prelude::*;
 use walkdir::WalkDir;
@@ -8,54 +8,68 @@ use walkdir::WalkDir;
 use super::ExifData;
 use super::parser::parse_exif;
 
-/// Supported image file extensions
 const IMAGE_EXTENSIONS: &[&str] = &[
-    // JPEG
     "jpg", "jpeg", "jpe", "jif", "jfif",
-    // TIFF
     "tiff", "tif",
-    // PNG
     "png",
-    // RAW formats
-    "cr2", "cr3", // Canon
-    "nef", "nrw", // Nikon
-    "arw", "srf", "sr2", // Sony
-    "orf", // Olympus
-    "raf", // Fujifilm
-    "rw2", // Panasonic
-    "pef", // Pentax
-    "dng", // Adobe DNG
-    "raw", "rwl", // Leica
-    "3fr", // Hasselblad
-    "kdc", "dcr", // Kodak
-    "mrw", // Minolta
-    "srw", // Samsung
-    "x3f", // Sigma
-    "bay", // Casio
+    "cr2", "cr3",
+    "nef", "nrw",
+    "arw", "srf", "sr2",
+    "orf",
+    "raf",
+    "rw2",
+    "pef",
+    "dng",
+    "raw", "rwl",
+    "3fr",
+    "kdc", "dcr",
+    "mrw",
+    "srw",
+    "x3f",
+    "bay",
 ];
 
-/// Scan result for a single image
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ScanResult {
-    /// Path to the image file
     pub path: PathBuf,
-    /// EXIF data (may be empty if parsing failed)
     pub exif: ExifData,
-    /// File size in bytes
     pub file_size: u64,
-    /// Error message if parsing failed
     pub error: Option<String>,
 }
 
-/// Scan a directory for images and extract EXIF data
-///
-/// # Arguments
-/// * `dir` - Directory to scan
-/// * `recursive` - Whether to scan subdirectories
-///
-/// # Returns
-/// * `Vec<ScanResult>` - List of scan results
+pub struct ScanProgress {
+    processed: usize,
+    total: usize,
+}
+
+impl ScanProgress {
+    fn new(total: usize) -> Self {
+        ScanProgress { processed: 0, total }
+    }
+
+    fn increment(&mut self) {
+        self.processed += 1;
+    }
+
+    fn percentage(&self) -> f64 {
+        if self.total == 0 {
+            0.0
+        } else {
+            (self.processed as f64 / self.total as f64) * 100.0
+        }
+    }
+}
+
 pub fn scan_directory<P: AsRef<Path>>(dir: P, recursive: bool) -> Vec<ScanResult> {
+    scan_directory_with_callback(dir, recursive, |_| {}, || false)
+}
+
+pub fn scan_directory_with_callback<P: AsRef<Path>>(
+    dir: P,
+    recursive: bool,
+    progress_callback: impl Fn(f64) + Send + Sync + 'static,
+    cancel_check: impl Fn() -> bool + Send + Sync + 'static,
+) -> Vec<ScanResult> {
     let dir = dir.as_ref();
 
     if !dir.exists() || !dir.is_dir() {
@@ -63,7 +77,6 @@ pub fn scan_directory<P: AsRef<Path>>(dir: P, recursive: bool) -> Vec<ScanResult
     }
 
     let extensions: HashSet<&str> = IMAGE_EXTENSIONS.iter().copied().collect();
-    let results = Arc::new(Mutex::new(Vec::new()));
 
     let walker = if recursive {
         WalkDir::new(dir)
@@ -76,7 +89,6 @@ pub fn scan_directory<P: AsRef<Path>>(dir: P, recursive: bool) -> Vec<ScanResult
             .into_iter()
     };
 
-    // Collect all image paths first
     let image_paths: Vec<PathBuf> = walker
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
@@ -90,11 +102,26 @@ pub fn scan_directory<P: AsRef<Path>>(dir: P, recursive: bool) -> Vec<ScanResult
         .map(|e| e.path().to_path_buf())
         .collect();
 
-    // Process images in parallel
+    let total_files = image_paths.len();
+    let progress = Arc::new(RwLock::new(ScanProgress::new(total_files)));
+    let results = Arc::new(Mutex::new(Vec::new()));
+
     image_paths.par_iter().for_each(|path| {
+        if cancel_check() {
+            return;
+        }
+
         let result = process_image(path);
         results.lock().unwrap().push(result);
+
+        let mut p = progress.write().unwrap();
+        p.increment();
+        progress_callback(p.percentage());
     });
+
+    if cancel_check() {
+        return Vec::new();
+    }
 
     match Arc::try_unwrap(results) {
         Ok(mutex) => mutex.into_inner().unwrap(),
@@ -102,7 +129,6 @@ pub fn scan_directory<P: AsRef<Path>>(dir: P, recursive: bool) -> Vec<ScanResult
     }
 }
 
-/// Process a single image file
 fn process_image(path: &Path) -> ScanResult {
     let file_size = path
         .metadata()
@@ -122,7 +148,6 @@ fn process_image(path: &Path) -> ScanResult {
     }
 }
 
-/// Check if a file extension is a supported image format
 pub fn is_image_file<P: AsRef<Path>>(path: P) -> bool {
     path.as_ref()
         .extension()
@@ -140,7 +165,6 @@ mod tests {
 
     fn create_test_image(dir: &Path, name: &str) -> PathBuf {
         let path = dir.join(name);
-        // Minimal valid JPEG
         let jpeg = vec![0xFF, 0xD8, 0xFF, 0xD9];
         let mut file = File::create(&path).unwrap();
         file.write_all(&jpeg).unwrap();
@@ -183,16 +207,13 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         create_test_image(temp_dir.path(), "photo1.jpg");
 
-        // Create subdirectory with image
         let sub_dir = temp_dir.path().join("subdir");
         fs::create_dir(&sub_dir).unwrap();
         create_test_image(&sub_dir, "photo2.jpg");
 
-        // Non-recursive should only find 1 image
         let results = scan_directory(temp_dir.path(), false);
         assert_eq!(results.len(), 1);
 
-        // Recursive should find both
         let results = scan_directory(temp_dir.path(), true);
         assert_eq!(results.len(), 2);
     }
@@ -200,6 +221,46 @@ mod tests {
     #[test]
     fn test_scan_directory_nonexistent() {
         let results = scan_directory("/nonexistent/path", true);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_scan_with_progress_callback() {
+        let temp_dir = TempDir::new().unwrap();
+        create_test_image(temp_dir.path(), "photo1.jpg");
+        create_test_image(temp_dir.path(), "photo2.jpg");
+        create_test_image(temp_dir.path(), "photo3.jpg");
+
+        let progress_values = Arc::new(Mutex::new(Vec::new()));
+        let progress_clone = Arc::clone(&progress_values);
+
+        let results = scan_directory_with_callback(
+            temp_dir.path(),
+            true,
+            move |p| progress_clone.lock().unwrap().push(p),
+            || false,
+        );
+
+        assert_eq!(results.len(), 3);
+        let values = progress_values.lock().unwrap();
+        assert!(!values.is_empty());
+        assert!(values.iter().any(|&v| v >= 100.0));
+    }
+
+    #[test]
+    fn test_scan_with_cancel() {
+        let temp_dir = TempDir::new().unwrap();
+        create_test_image(temp_dir.path(), "photo1.jpg");
+        create_test_image(temp_dir.path(), "photo2.jpg");
+        create_test_image(temp_dir.path(), "photo3.jpg");
+
+        let results = scan_directory_with_callback(
+            temp_dir.path(),
+            true,
+            |_| {},
+            || true,
+        );
+
         assert!(results.is_empty());
     }
 }

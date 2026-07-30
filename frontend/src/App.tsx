@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import React, { useEffect } from 'react'
 import { open } from '@tauri-apps/api/dialog'
 import { useAppStore } from './store'
 import { Button } from '@/components/ui/button'
@@ -8,10 +8,34 @@ import { FilterPanel } from './components/FilterPanel'
 import { ImageDetail } from './components/ImageDetail'
 import { VirtualizedGrid, VirtualizedList } from './components/VirtualizedGrid'
 
+// Responsive grid columns based on container width
+function useGridColumns() {
+  const [columns, setColumns] = React.useState(5)
+
+  React.useEffect(() => {
+    const updateColumns = () => {
+      const width = window.innerWidth - 320 // subtract sidebar
+      if (width < 640) setColumns(2)
+      else if (width < 768) setColumns(3)
+      else if (width < 1024) setColumns(4)
+      else setColumns(5)
+    }
+    updateColumns()
+    window.addEventListener('resize', updateColumns)
+    return () => window.removeEventListener('resize', updateColumns)
+  }, [])
+
+  return columns
+}
+
 function App() {
+  const columns = useGridColumns()
   const {
     isScanning,
+    scanProgress,
     filteredResults,
+    scanResults,
+    selectedDirectory,
     cameraStats,
     lensStats,
     focalLengthStats,
@@ -22,7 +46,8 @@ function App() {
     sortOrder,
     theme,
     setSelectedDirectory,
-    scanDirectory,
+    scanDirectoryWithProgress,
+    cancelScan,
     deleteSelectedImages,
     setViewMode,
     selectAllImages,
@@ -32,6 +57,9 @@ function App() {
     toggleSortOrder,
     setTheme,
     exportToJSON,
+    filterByCamera,
+    filterByLens,
+    resetFilter,
   } = useAppStore()
 
   // Delete key handler
@@ -52,11 +80,16 @@ function App() {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [selectedImages.size, selectedDetailImage, deleteSelectedImages, setSelectedDetailImage])
 
+  // Apply theme on mount
+  useEffect(() => {
+    setTheme(theme)
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
   const handleSelectDirectory = async () => {
     const selected = await open({ directory: true, multiple: false })
     if (selected && typeof selected === 'string') {
       setSelectedDirectory(selected)
-      await scanDirectory(selected, true)
+      await scanDirectoryWithProgress(selected, true)
     }
   }
 
@@ -133,6 +166,7 @@ function App() {
                     percentage: c.percentage,
                   }))}
                   title="相机"
+                  onItemClick={(name) => filterByCamera(name)}
                 />
               </div>
             )}
@@ -149,6 +183,7 @@ function App() {
                     percentage: l.percentage,
                   }))}
                   title="镜头"
+                  onItemClick={(name) => filterByLens(name)}
                 />
               </div>
             )}
@@ -235,7 +270,7 @@ function App() {
             {viewMode === 'grid' ? (
               <VirtualizedGrid
                 items={filteredResults}
-                columns={5}
+                columns={columns}
                 renderItem={(result, index) => (
                   <div
                     key={result.path}
@@ -304,7 +339,17 @@ function App() {
           {isScanning && (
             <div className="flex flex-col items-center justify-center h-64">
               <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin mb-4" />
-              <p className="text-sm text-muted-foreground">扫描中...</p>
+              <p className="text-sm text-muted-foreground mb-4">扫描中...</p>
+              <div className="w-64 bg-muted rounded-full h-2 mb-2">
+                <div
+                  className="bg-primary h-2 rounded-full transition-all duration-300"
+                  style={{ width: `${scanProgress}%` }}
+                />
+              </div>
+              <p className="text-xs text-muted-foreground">{scanProgress.toFixed(0)}%</p>
+              <Button variant="outline" size="sm" className="mt-4" onClick={cancelScan}>
+                取消扫描
+              </Button>
             </div>
           )}
         </main>
@@ -317,6 +362,30 @@ function App() {
           onClose={() => setSelectedDetailImage(null)}
         />
       )}
+
+      {/* Status Bar */}
+      <div className="fixed bottom-0 left-0 right-0 border-t border-border bg-background/95 backdrop-blur px-4 py-1.5 flex items-center justify-between text-xs text-muted-foreground z-40">
+        <div className="flex items-center gap-4">
+          <span>总计: {scanResults.length} 张</span>
+          <span>显示: {filteredResults.length} 张</span>
+          {selectedImages.size > 0 && <span className="text-primary font-medium">已选: {selectedImages.size} 张</span>}
+        </div>
+        <div className="flex items-center gap-4">
+          {filteredResults.length !== scanResults.length && scanResults.length > 0 && (
+            <button
+              className="text-primary hover:underline cursor-pointer"
+              onClick={resetFilter}
+            >
+              清除筛选
+            </button>
+          )}
+          {selectedDirectory && (
+            <span className="truncate max-w-[300px]" title={selectedDirectory}>
+              {selectedDirectory}
+            </span>
+          )}
+        </div>
+      </div>
     </div>
   )
 }
