@@ -20,6 +20,8 @@ kamadak-exif = "0.5"
 walkdir = "2"
 rayon = "1"
 trash = "3"
+image = "0.24"
+base64 = "0.21"
 
 [dev-dependencies]
 tempfile = "3"

@@ -1,11 +1,14 @@
 pub mod exif;
 
+use std::path::Path;
+
 use exif::scanner::{scan_directory, ScanResult};
 use exif::stats::{
     calculate_camera_stats, calculate_focal_length_stats, calculate_lens_stats,
     filter_results, CameraStats, FilterCriteria, FocalLengthStats, LensStats,
 };
 use exif::file_ops::{delete_file, delete_files};
+use exif::thumbnail::{get_thumbnail_path, get_image_base64};
 
 /// Scan a directory for images
 #[tauri::command]
@@ -49,6 +52,22 @@ fn delete_images(paths: Vec<String>) -> Vec<Result<(), String>> {
     delete_files(&paths)
 }
 
+/// Get thumbnail path for an image
+#[tauri::command]
+fn get_thumbnail(path: String) -> Result<String, String> {
+    let path = Path::new(&path);
+    let thumb_path = get_thumbnail_path(path)?;
+    Ok(thumb_path.to_string_lossy().to_string())
+}
+
+/// Get image data as base64 for display
+#[tauri::command]
+fn get_image_data(path: String, max_size: Option<u32>) -> Result<String, String> {
+    let path = Path::new(&path);
+    let size = max_size.unwrap_or(800);
+    get_image_base64(path, size)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -60,6 +79,8 @@ pub fn run() {
             filter_images,
             delete_image,
             delete_images,
+            get_thumbnail,
+            get_image_data,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
