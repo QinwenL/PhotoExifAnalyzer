@@ -50,6 +50,8 @@ function App() {
     sortBy,
     sortOrder,
     theme,
+    errorMessage,
+    clearErrorMessage,
     setSelectedDirectory,
     scanDirectoryWithProgress,
     cancelScan,
@@ -193,6 +195,21 @@ function App() {
           </div>
         </div>
       </header>
+
+      {/* Error Banner */}
+      {errorMessage && (
+        <div className="bg-destructive/10 border-b border-destructive/30 px-4 py-2 flex items-center justify-between gap-4">
+          <p className="text-sm text-destructive">{errorMessage}</p>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="text-destructive hover:bg-destructive/20"
+            onClick={clearErrorMessage}
+          >
+            ✕
+          </Button>
+        </div>
+      )}
 
       {/* Main Content */}
       <div className="flex h-[calc(100vh-65px)]">

@@ -14,7 +14,8 @@ interface ImageDetailProps {
 export function ImageDetail({ result, onClose, onDelete }: ImageDetailProps) {
   const [imageUrl, setImageUrl] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
-  const { toggleImageSelection, selectedImages } = useAppStore()
+  const toggleImageSelection = useAppStore((s) => s.toggleImageSelection)
+  const selectedImages = useAppStore((s) => s.selectedImages)
 
   useEffect(() => {
     const loadImage = async () => {
@@ -27,6 +28,10 @@ export function ImageDetail({ result, onClose, onDelete }: ImageDetailProps) {
         setImageUrl(data)
       } catch (error) {
         console.error('Failed to load image:', error)
+        // 向用户展示失败原因，而非静默
+        useAppStore.setState({
+          errorMessage: `图片加载失败：${error instanceof Error ? error.message : String(error)}`,
+        })
       } finally {
         setLoading(false)
       }

@@ -112,6 +112,11 @@ interface AppState {
   isScanning: boolean
   scanProgress: number
 
+  // 用户可见的错误消息（null 表示无错误）。捕获原本只 console.error
+  // 的失败（扫描失败、取消失败、图片加载失败等），让 UI 能向用户反馈。
+  errorMessage: string | null
+  clearErrorMessage: () => void
+
   // Data
   scanResults: ScanResult[]
   filteredResults: ScanResult[]
@@ -184,6 +189,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   })(),
   isScanning: false,
   scanProgress: 0,
+  errorMessage: null,
+  clearErrorMessage: () => set({ errorMessage: null }),
   scanResults: [],
   filteredResults: [],
   cameraStats: null,
@@ -239,7 +246,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       get().updateStatistics()
     } catch (error) {
       console.error('Scan failed:', error)
-      set({ isScanning: false })
+      set({
+        isScanning: false,
+        errorMessage: `扫描失败：${error instanceof Error ? error.message : String(error)}`,
+      })
     }
   },
 
@@ -249,6 +259,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({ isScanning: false, scanProgress: 0 })
     } catch (error) {
       console.error('Cancel scan failed:', error)
+      set({
+        errorMessage: `取消扫描失败：${error instanceof Error ? error.message : String(error)}`,
+      })
     }
   },
 
@@ -332,7 +345,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       // 整体调用失败（IPC 错误等）：复位 isDeleting，保留状态不变
       await progressHandler.catch(() => {})
       console.error('Delete failed:', error)
-      set({ isDeleting: false, deleteProgress: 0 })
+      set({
+        isDeleting: false,
+        deleteProgress: 0,
+        errorMessage: `删除失败：${error instanceof Error ? error.message : String(error)}`,
+      })
     }
   },
 
