@@ -11,6 +11,7 @@ import { StatusBar } from './components/StatusBar'
 import { ConfirmDialog } from './components/ConfirmDialog'
 import { Thumbnail } from './components/Thumbnail'
 import { formatCamera } from '@/lib/utils'
+import { getKeyboardAction, isTextInputTarget } from '@/lib/keyboard'
 
 // Responsive grid columns based on container width
 function useGridColumns() {
@@ -67,23 +68,41 @@ function App() {
     setDetailMode,
   } = useAppStore()
 
-  // Delete key handler
+  // Global keyboard shortcuts (Ctrl+A, Delete, Escape)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Delete' && selectedImages.size > 0 && !selectedDetailImage) {
-        // Find the actual ScanResult objects for selected images
-        const imagesToDelete = filteredResults.filter((r) => selectedImages.has(r.path))
-        setPendingDeleteImages(imagesToDelete)
-        setShowDeleteConfirm(true)
-      }
-      if (e.key === 'Escape' && selectedDetailImage) {
-        setSelectedDetailImage(null)
+      const action = getKeyboardAction(e, {
+        hasSelection: selectedImages.size > 0,
+        hasDetailOpen: !!selectedDetailImage,
+        hasResults: filteredResults.length > 0,
+        isTextInput: isTextInputTarget(e.target),
+      })
+
+      switch (action.type) {
+        case 'selectAll': {
+          // 阻止浏览器默认文本选择行为，改为选中所有图片
+          e.preventDefault()
+          selectAllImages()
+          break
+        }
+        case 'delete': {
+          const imagesToDelete = filteredResults.filter((r) => selectedImages.has(r.path))
+          setPendingDeleteImages(imagesToDelete)
+          setShowDeleteConfirm(true)
+          break
+        }
+        case 'escape': {
+          setSelectedDetailImage(null)
+          break
+        }
+        case 'none':
+          break
       }
     }
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [selectedImages, selectedDetailImage, filteredResults, deleteSelectedImages, setSelectedDetailImage])
+  }, [selectedImages, selectedDetailImage, filteredResults, selectAllImages, setSelectedDetailImage])
 
   // Apply theme on mount
   useEffect(() => {
@@ -307,10 +326,56 @@ function App() {
                     onDoubleClick={() => setSelectedDetailImage(result)}
                   >
                     <Thumbnail path={result.path} className="absolute inset-0" />
-                    <div className="absolute bottom-0 left-0 right-0 bg-black/60 px-1 py-0.5">
-                      <p className="text-[10px] text-white truncate">
+                    {/* Error indicator */}
+                    {result.error && (
+                      <div className="absolute top-2 left-2 bg-destructive/90 text-destructive-foreground text-[9px] px-1.5 py-0.5 rounded">
+                        EXIF 解析失败
+                      </div>
+                    )}
+                    {/* EXIF info overlay */}
+                    <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 via-black/70 to-transparent px-1.5 pt-4 pb-1">
+                      <p className="text-[10px] text-white truncate font-medium">
                         {result.path.split(/[/\\]/).pop()}
                       </p>
+                      <div className="flex flex-wrap gap-x-1.5 gap-y-0 mt-0.5">
+                        {formatCamera(result.exif) && (
+                          <span className="text-[9px] text-white/90 truncate max-w-full">
+                            {formatCamera(result.exif)}
+                          </span>
+                        )}
+                        {result.exif.lens_model && (
+                          <span className="text-[9px] text-white/80 truncate max-w-full">
+                            {result.exif.lens_model}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex flex-wrap gap-x-1.5 gap-y-0 mt-0.5 items-center">
+                        {result.exif.focal_length && (
+                          <span className="text-[9px] text-white/80">
+                            {result.exif.focal_length}mm
+                          </span>
+                        )}
+                        {result.exif.aperture && (
+                          <span className="text-[9px] text-white/80">
+                            f/{result.exif.aperture}
+                          </span>
+                        )}
+                        {result.exif.iso && (
+                          <span className="text-[9px] text-white/80">
+                            ISO {result.exif.iso}
+                          </span>
+                        )}
+                        {result.exif.exposure_time && (
+                          <span className="text-[9px] text-white/80">
+                            {formatExposureTimeGrid(result.exif.exposure_time)}
+                          </span>
+                        )}
+                      </div>
+                      {result.exif.datetime_original && (
+                        <p className="text-[9px] text-white/70 mt-0.5">
+                          {result.exif.datetime_original.split('T')[0]}
+                        </p>
+                      )}
                     </div>
                     {selectedImages.has(result.path) && (
                       <div className="absolute top-2 right-2 w-5 h-5 bg-primary rounded-full flex items-center justify-center">
@@ -435,3 +500,11 @@ function App() {
 }
 
 export default App
+
+function formatExposureTimeGrid(time: number): string {
+  if (time >= 1) {
+    return `${time}s`
+  }
+  const denominator = Math.round(1 / time)
+  return `1/${denominator}s`
+}
