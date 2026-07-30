@@ -1,6 +1,6 @@
-import React, { useEffect } from 'react'
+import React, { useEffect, useState } from 'react'
 import { open } from '@tauri-apps/api/dialog'
-import { useAppStore } from './store'
+import { useAppStore, type ScanResult } from './store'
 import { Button } from '@/components/ui/button'
 import { FocalLengthChart } from './components/FocalLengthChart'
 import { DistributionChart } from './components/DistributionChart'
@@ -8,6 +8,7 @@ import { FilterPanel } from './components/FilterPanel'
 import { ImageDetail } from './components/ImageDetail'
 import { VirtualizedGrid, VirtualizedList } from './components/VirtualizedGrid'
 import { StatusBar } from './components/StatusBar'
+import { ConfirmDialog } from './components/ConfirmDialog'
 
 // Responsive grid columns based on container width
 function useGridColumns() {
@@ -31,6 +32,8 @@ function useGridColumns() {
 
 function App() {
   const columns = useGridColumns()
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [pendingDeleteImages, setPendingDeleteImages] = useState<ScanResult[]>([])
   const {
     isScanning,
     scanProgress,
@@ -58,16 +61,18 @@ function App() {
     exportToJSON,
     filterByCamera,
     filterByLens,
+    detailMode,
+    setDetailMode,
   } = useAppStore()
 
   // Delete key handler
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Delete' && selectedImages.size > 0 && !selectedDetailImage) {
-        const confirmed = window.confirm(`确定要将 ${selectedImages.size} 张图片移到回收站吗？`)
-        if (confirmed) {
-          deleteSelectedImages()
-        }
+        // Find the actual ScanResult objects for selected images
+        const imagesToDelete = filteredResults.filter((r) => selectedImages.has(r.path))
+        setPendingDeleteImages(imagesToDelete)
+        setShowDeleteConfirm(true)
       }
       if (e.key === 'Escape' && selectedDetailImage) {
         setSelectedDetailImage(null)
@@ -76,7 +81,7 @@ function App() {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [selectedImages.size, selectedDetailImage, deleteSelectedImages, setSelectedDetailImage])
+  }, [selectedImages.size, selectedDetailImage, filteredResults, deleteSelectedImages, setSelectedDetailImage])
 
   // Apply theme on mount
   useEffect(() => {
@@ -93,10 +98,20 @@ function App() {
 
   const handleDelete = async () => {
     if (selectedImages.size === 0) return
-    const confirmed = window.confirm(`确定要将 ${selectedImages.size} 张图片移到回收站吗？`)
-    if (confirmed) {
-      await deleteSelectedImages()
-    }
+    const imagesToDelete = filteredResults.filter((r) => selectedImages.has(r.path))
+    setPendingDeleteImages(imagesToDelete)
+    setShowDeleteConfirm(true)
+  }
+
+  const confirmDelete = async () => {
+    await deleteSelectedImages()
+    setShowDeleteConfirm(false)
+    setPendingDeleteImages([])
+  }
+
+  const cancelDelete = () => {
+    setShowDeleteConfirm(false)
+    setPendingDeleteImages([])
   }
 
   return (
@@ -247,6 +262,15 @@ function App() {
               >
                 列表
               </Button>
+              {viewMode === 'list' && (
+                <Button
+                  variant={detailMode === 'detailed' ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={() => setDetailMode(detailMode === 'simple' ? 'detailed' : 'simple')}
+                >
+                  {detailMode === 'simple' ? '详细' : '简洁'}
+                </Button>
+              )}
               {filteredResults.length > 0 && (
                 <>
                   <Button variant="outline" size="sm" onClick={selectAllImages}>
@@ -299,7 +323,9 @@ function App() {
                 renderItem={(result, index) => (
                   <div
                     key={result.path}
-                    className={`flex items-center gap-3 p-2 rounded cursor-pointer transition-colors h-12 ${
+                    className={`flex items-center gap-3 p-2 rounded cursor-pointer transition-colors ${
+                      detailMode === 'detailed' ? 'min-h-[60px]' : 'h-12'
+                    } ${
                       selectedImages.has(result.path) ? 'bg-primary/10' : 'hover:bg-muted'
                     }`}
                     onClick={(e) => useAppStore.getState().toggleImageSelection(result.path, index, e.shiftKey, e.ctrlKey || e.metaKey)}
@@ -313,12 +339,38 @@ function App() {
                     />
                     <div className="flex-1 min-w-0">
                       <p className="text-sm truncate">{result.path.split(/[/\\]/).pop()}</p>
-                      <p className="text-xs text-muted-foreground truncate">{result.path}</p>
+                      {detailMode === 'detailed' ? (
+                        <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1">
+                          {result.exif.make && (
+                            <span className="text-xs text-muted-foreground">{result.exif.make} {result.exif.model}</span>
+                          )}
+                          {result.exif.lens_model && (
+                            <span className="text-xs text-muted-foreground">{result.exif.lens_model}</span>
+                          )}
+                          {result.exif.focal_length && (
+                            <span className="text-xs text-muted-foreground">{result.exif.focal_length}mm</span>
+                          )}
+                          {result.exif.aperture && (
+                            <span className="text-xs text-muted-foreground">f/{result.exif.aperture}</span>
+                          )}
+                          {result.exif.iso && (
+                            <span className="text-xs text-muted-foreground">ISO {result.exif.iso}</span>
+                          )}
+                          {result.exif.datetime_original && (
+                            <span className="text-xs text-muted-foreground">{result.exif.datetime_original.split('T')[0]}</span>
+                          )}
+                          <span className="text-xs text-muted-foreground">{(result.file_size / 1024).toFixed(0)}KB</span>
+                        </div>
+                      ) : (
+                        <p className="text-xs text-muted-foreground truncate">{result.path}</p>
+                      )}
                     </div>
-                    <div className="text-xs text-muted-foreground">
-                      {result.exif.make && <span>{result.exif.make} </span>}
-                      {result.exif.model && <span>{result.exif.model}</span>}
-                    </div>
+                    {!detailMode || detailMode === 'simple' ? (
+                      <div className="text-xs text-muted-foreground">
+                        {result.exif.make && <span>{result.exif.make} </span>}
+                        {result.exif.model && <span>{result.exif.model}</span>}
+                      </div>
+                    ) : null}
                   </div>
                 )}
               />
@@ -362,6 +414,17 @@ function App() {
       )}
 
       <StatusBar />
+
+      {/* Delete Confirmation Dialog */}
+      {showDeleteConfirm && (
+        <ConfirmDialog
+          title="确认删除"
+          message={`确定要将以下 ${pendingDeleteImages.length} 张图片移到回收站吗？`}
+          images={pendingDeleteImages}
+          onConfirm={confirmDelete}
+          onCancel={cancelDelete}
+        />
+      )}
     </div>
   )
 }

@@ -89,7 +89,7 @@ export function FilterPanel() {
     }
 
     if (dateStart || dateEnd) {
-      criteria.date_range = [dateStart, dateEnd]
+      criteria.date_range = [dateStart || '', dateEnd || '']
     }
 
     setFilterCriteria(criteria)
@@ -108,6 +108,10 @@ export function FilterPanel() {
     setDateStart('')
     setDateEnd('')
     setLocalCriteria({ and_mode: false })
+    setIsoMax('')
+    setDateStart('')
+    setDateEnd('')
+    setLocalCriteria({ and_mode: false })
     setFilterCriteria({ and_mode: false })
     applyFilter()
   }
@@ -121,6 +125,8 @@ export function FilterPanel() {
     apertureMax ||
     isoMin ||
     isoMax ||
+    dateStart ||
+    dateEnd
     dateStart ||
     dateEnd
 

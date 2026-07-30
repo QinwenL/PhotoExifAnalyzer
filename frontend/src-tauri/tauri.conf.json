@@ -16,6 +16,9 @@
         "all": false,
         "open": true
       },
+      "dialog": {
+        "all": true
+      },
       "fs": {
         "all": false,
         "readFile": true,

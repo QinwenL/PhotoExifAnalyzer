@@ -391,4 +391,91 @@ mod tests {
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].exif.datetime_original.as_deref(), Some("2024-02-20T14:00:00"));
     }
+
+    #[test]
+    fn test_filter_iso_aperture_or_mode() {
+        // Tests ISO and aperture filters in OR mode (Oracle recommended gap test)
+        let mut r1 = create_test_result("Canon", "R5", "RF 50mm", 50.0);
+        r1.exif.iso = Some(100);
+        r1.exif.aperture = Some(1.2);
+
+        let mut r2 = create_test_result("Canon", "R5", "RF 50mm", 50.0);
+        r2.exif.iso = Some(6400);
+        r2.exif.aperture = Some(8.0);
+
+        let mut r3 = create_test_result("Nikon", "Z6", "NIKKOR 50mm", 50.0);
+        r3.exif.iso = Some(3200);
+        r3.exif.aperture = Some(4.0);
+
+        let results = vec![r1, r2, r3];
+
+        // OR mode: ISO in [100,200] OR aperture in [1.0,2.0]
+        let criteria = FilterCriteria {
+            iso: Some((100, 200)),
+            aperture: Some((1.0, 2.0)),
+            and_mode: false,
+            ..Default::default()
+        };
+
+        let filtered = filter_results(&results, &criteria);
+        // r1 matches both, r2 matches neither, r3 matches neither
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].exif.iso, Some(100));
+
+        // AND mode: must match BOTH
+        let criteria_and = FilterCriteria {
+            iso: Some((100, 200)),
+            aperture: Some((1.0, 2.0)),
+            and_mode: true,
+            ..Default::default()
+        };
+
+        let filtered_and = filter_results(&results, &criteria_and);
+        // Only r1 matches both conditions
+        assert_eq!(filtered_and.len(), 1);
+    }
+
+    #[test]
+    fn test_camera_stats_make_only() {
+        // Oracle recommended: test make-only path (model == None)
+        let results = vec![
+            ScanResult {
+                path: PathBuf::from("/test/a.jpg"),
+                exif: ExifData {
+                    make: Some("Canon".to_string()),
+                    model: None,
+                    ..Default::default()
+                },
+                file_size: 1000,
+                error: None,
+            },
+            ScanResult {
+                path: PathBuf::from("/test/b.jpg"),
+                exif: ExifData {
+                    make: Some("Canon".to_string()),
+                    model: Some("EOS R5".to_string()),
+                    ..Default::default()
+                },
+                file_size: 1000,
+                error: None,
+            },
+        ];
+
+        let stats = calculate_camera_stats(&results);
+        assert_eq!(stats.total, 2);
+        // "Canon" (make-only) and "Canon EOS R5" should be separate entries
+        assert_eq!(stats.cameras.len(), 2);
+    }
+
+    #[test]
+    fn test_filter_empty_results() {
+        let results: Vec<ScanResult> = vec![];
+        let criteria = FilterCriteria {
+            cameras: Some(vec!["Canon".to_string()]),
+            and_mode: false,
+            ..Default::default()
+        };
+        let filtered = filter_results(&results, &criteria);
+        assert!(filtered.is_empty());
+    }
 }

@@ -16,6 +16,7 @@ interface PieChartData {
 interface DistributionChartProps {
   data: PieChartData[]
   title: string
+  onItemClick?: (name: string) => void
 }
 
 const COLORS = [
@@ -31,7 +32,7 @@ const COLORS = [
   '#8dd1e1',
 ]
 
-export function DistributionChart({ data, title }: DistributionChartProps) {
+export function DistributionChart({ data, title, onItemClick }: DistributionChartProps) {
   if (!data || data.length === 0) {
     return (
       <div className="text-sm text-muted-foreground text-center py-4">
@@ -65,6 +66,8 @@ export function DistributionChart({ data, title }: DistributionChartProps) {
             outerRadius={80}
             fill="#8884d8"
             dataKey="value"
+            onClick={onItemClick ? (data: { name?: string }) => { if (data.name) onItemClick(data.name) } : undefined}
+            style={onItemClick ? { cursor: 'pointer' } : undefined}
           >
             {chartData.map((_, index) => (
               <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
