@@ -35,6 +35,35 @@
 - **THEN** 扫描 SHALL 在 5 秒内完成
 - **AND** CPU 使用率 SHALL 不超过 80%
 
+### Requirement: 异步扫描不阻塞 UI
+系统 SHALL 以异步方式执行扫描命令，扫描期间前端 UI SHALL 保持响应。
+
+#### Scenario: 扫描期间界面可交互
+- **WHEN** 用户触发扫描且扫描进行中
+- **THEN** 扫描命令 SHALL 在后台线程执行（`spawn_blocking`）
+- **AND** Tauri 主线程 SHALL 不被阻塞
+- **AND** 前端 SHALL 能够接收扫描进度事件并更新界面
+
+#### Scenario: 扫描取消
+- **WHEN** 用户在扫描进行中点击取消
+- **THEN** 系统 SHALL 通过共享取消标志通知后台扫描线程
+- **AND** 扫描线程 SHALL 在检查到取消标志后尽快停止
+- **AND** 已扫描的部分结果 SHALL 被丢弃（返回空列表）
+
+### Requirement: 扫描进度实时推送
+系统 SHALL 在扫描过程中通过 Tauri 事件实时推送扫描进度。
+
+#### Scenario: 进度事件推送
+- **WHEN** 扫描器处理图片文件时
+- **THEN** 系统 SHALL 通过 `scan_progress` 事件推送进度百分比（0-100）
+- **AND** 进度百分比 SHALL 等于 `已处理文件数 / 总文件数 * 100`
+- **AND** 事件 SHALL 在后台线程中发送（`window.emit`）
+
+#### Scenario: 进度从 0 开始
+- **WHEN** 扫描开始时
+- **THEN** 前端 SHALL 显示进度为 0%
+- **AND** 扫描完成后 SHALL 显示进度为 100%
+
 ### Requirement: 缓存 EXIF 数据
 系统 SHALL 将解析的 EXIF 数据缓存到本地数据库。
 
