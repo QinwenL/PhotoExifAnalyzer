@@ -142,7 +142,6 @@ interface AppState {
 
   // Actions
   setSelectedDirectory: (dir: string | null) => void
-  scanDirectory: (dir: string, recursive: boolean) => Promise<void>
   scanDirectoryWithProgress: (dir: string, recursive: boolean) => Promise<void>
   cancelScan: () => Promise<void>
   updateStatistics: () => void
@@ -202,37 +201,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ selectedDirectory: dir })
     if (dir) {
       try { localStorage.setItem('lastDirectory', dir) } catch { /* ignore */ }
-    }
-  },
-
-  scanDirectory: async (dir, recursive) => {
-    set({ isScanning: true, scanProgress: 0 })
-    // Bump thumbnailEpoch to rotate to a new counter bucket before the
-    // batch of `beginThumbnailLoad` calls that the re-mounted Thumbnail
-    // components will fire. This is REQUIRED for correctness in the
-    // "cancel + immediately re-scan same dir" scenario:
-    //   - `Thumbnail` subscribes to `thumbnailEpoch` via a Zustand
-    //     selector, so epoch change ⇒ re-render ⇒ effect re-run for
-    //     EVERY tile that still has src===null (otherwise those tiles
-    //     stay as `animate-pulse` skeletons forever because React
-    //     reuses the same key={path} component instance).
-    //   - begin/complete callbacks gate their counter mutations on
-    //     `epoch === state.thumbnailEpoch`, so in-flight completes from
-    //     the previous scan are silently dropped instead of corrupting
-    //     the new batch's counters.
-    get().resetThumbnailProgress()
-    try {
-      const results: ScanResult[] = await invoke('scan_images', { dir, recursive })
-      set({
-        scanResults: results,
-        filteredResults: results,
-        isScanning: false,
-        scanProgress: 100,
-      })
-      get().updateStatistics()
-    } catch (error) {
-      console.error('Scan failed:', error)
-      set({ isScanning: false })
     }
   },
 

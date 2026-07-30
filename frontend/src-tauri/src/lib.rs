@@ -4,14 +4,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use exif::cache::ExifCache;
-use exif::scanner::{scan_directory, scan_directory_with_cache, ScanResult};
+use exif::scanner::{scan_directory_with_cache, ScanResult};
 use exif::stats::{
     calculate_camera_stats, calculate_focal_length_stats, calculate_lens_stats,
     filter_results, CameraStats, FilterCriteria, FocalLengthStats, LensStats,
 };
 use serde::Serialize;
-use exif::file_ops::{delete_file, delete_files};
-use exif::thumbnail::{delete_thumbnail, delete_all_size_caches, get_thumbnail_path};
+use exif::file_ops::delete_file;
+use exif::thumbnail::{delete_thumbnail, delete_all_size_caches};
 
 lazy_static::lazy_static! {
     static ref SCAN_CANCELLED: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
@@ -47,12 +47,6 @@ fn get_cache_dir() -> Option<PathBuf> {
         return Some(PathBuf::from(home).join(".local/share/photo-exif-analyzer"));
     }
     None
-}
-
-#[tauri::command]
-fn scan_images(dir: String, recursive: bool) -> Vec<ScanResult> {
-    *SCAN_CANCELLED.lock().unwrap() = false;
-    scan_directory(&dir, recursive)
 }
 
 #[tauri::command]
@@ -147,21 +141,6 @@ fn delete_image(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn delete_images(paths: Vec<String>) -> Vec<Result<(), String>> {
-    let results = delete_files(&paths);
-    let to_cleanup: Vec<String> = paths
-        .iter()
-        .zip(results.iter())
-        .filter(|(_, r)| r.is_ok())
-        .map(|(p, _)| p.clone())
-        .collect();
-    if !to_cleanup.is_empty() {
-        cleanup_caches_async(to_cleanup);
-    }
-    results
-}
-
-#[tauri::command]
 fn delete_images_with_progress(window: tauri::Window, paths: Vec<String>) -> Vec<Result<(), String>> {
     let total = paths.len() as f64;
     let mut results = Vec::with_capacity(paths.len());
@@ -188,13 +167,6 @@ fn delete_images_with_progress(window: tauri::Window, paths: Vec<String>) -> Vec
     }
 
     results
-}
-
-#[tauri::command]
-fn get_thumbnail(path: String) -> Result<String, String> {
-    let path = Path::new(&path);
-    let thumb_path = get_thumbnail_path(path)?;
-    Ok(thumb_path.to_string_lossy().to_string())
 }
 
 #[tauri::command]
@@ -287,7 +259,6 @@ fn export_statistics(results: Vec<ScanResult>) -> Result<ExportData, String> {
 pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
-            scan_images,
             scan_images_with_progress,
             cancel_scan,
             get_camera_stats,
@@ -295,9 +266,7 @@ pub fn run() {
             get_focal_length_stats,
             filter_images,
             delete_image,
-            delete_images,
             delete_images_with_progress,
-            get_thumbnail,
             get_image_data,
             export_statistics,
         ])
