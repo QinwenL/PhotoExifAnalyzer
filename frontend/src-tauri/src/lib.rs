@@ -56,7 +56,11 @@ fn scan_images(dir: String, recursive: bool) -> Vec<ScanResult> {
 }
 
 #[tauri::command]
-fn scan_images_with_progress(window: tauri::Window, dir: String, recursive: bool) -> Vec<ScanResult> {
+async fn scan_images_with_progress(
+    window: tauri::Window,
+    dir: String,
+    recursive: bool,
+) -> Result<Vec<ScanResult>, String> {
     *SCAN_CANCELLED.lock().unwrap() = false;
     let cancelled = Arc::clone(&SCAN_CANCELLED);
 
@@ -68,15 +72,24 @@ fn scan_images_with_progress(window: tauri::Window, dir: String, recursive: bool
         let _ = cache.lock().unwrap().cleanup();
     }
 
-    scan_directory_with_cache(
-        &dir,
-        recursive,
-        cache,
-        move |pct| {
-            let _ = window.emit("scan_progress", pct);
-        },
-        move || *cancelled.lock().unwrap(),
-    )
+    // Run the blocking scan on a background thread so the Tauri main thread
+    // (and thus the webview event loop) stays responsive. Progress events
+    // emitted from this thread can be delivered to the frontend immediately.
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        scan_directory_with_cache(
+            &dir,
+            recursive,
+            cache,
+            move |pct| {
+                let _ = window.emit("scan_progress", pct);
+            },
+            move || *cancelled.lock().unwrap(),
+        )
+    })
+    .await
+    .map_err(|e| format!("Scan task failed: {}", e))?;
+
+    Ok(result)
 }
 
 #[tauri::command]
