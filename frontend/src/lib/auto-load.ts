@@ -12,8 +12,14 @@
  *
  * 仅检查 lastDirectory 是否有效（非 null、非空）。
  * 重复加载的避免由 useEffect 的空依赖数组保证（只在挂载时触发一次）。
+ *
+ * 实现为 type guard，让调用方在分支内获得 `string` 类型而非
+ * `string | null`，避免向 `scanDirectoryWithProgress(dir: string)`
+ * 传入可能为 null 的值。
  */
-export function shouldAutoLoadLastDirectory(lastDirectory: string | null): boolean {
+export function shouldAutoLoadLastDirectory(
+  lastDirectory: string | null
+): lastDirectory is string {
   return lastDirectory !== null && lastDirectory.length > 0
 }
 
