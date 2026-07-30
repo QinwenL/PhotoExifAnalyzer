@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button'
 import { FocalLengthChart } from './components/FocalLengthChart'
 import { DistributionChart } from './components/DistributionChart'
 import { FilterPanel } from './components/FilterPanel'
+import { ImageDetail } from './components/ImageDetail'
 
 function App() {
   const {
@@ -14,12 +15,14 @@ function App() {
     focalLengthStats,
     viewMode,
     selectedImages,
+    selectedDetailImage,
     setSelectedDirectory,
     scanDirectory,
     deleteSelectedImages,
     setViewMode,
     selectAllImages,
     clearSelection,
+    setSelectedDetailImage,
   } = useAppStore()
 
   const handleSelectDirectory = async () => {
@@ -159,6 +162,7 @@ function App() {
                       : 'hover:ring-2 hover:ring-primary/50'
                   }`}
                   onClick={() => useAppStore.getState().toggleImageSelection(result.path)}
+                  onDoubleClick={() => setSelectedDetailImage(result)}
                 >
                   <div className="absolute inset-0 bg-muted flex items-center justify-center">
                     <span className="text-xs text-muted-foreground truncate px-2">
@@ -182,6 +186,7 @@ function App() {
                     selectedImages.has(result.path) ? 'bg-primary/10' : 'hover:bg-muted'
                   }`}
                   onClick={() => useAppStore.getState().toggleImageSelection(result.path)}
+                  onDoubleClick={() => setSelectedDetailImage(result)}
                 >
                   <input
                     type="checkbox"
@@ -219,6 +224,14 @@ function App() {
           )}
         </main>
       </div>
+
+      {/* Image Detail Modal */}
+      {selectedDetailImage && (
+        <ImageDetail
+          result={selectedDetailImage}
+          onClose={() => setSelectedDetailImage(null)}
+        />
+      )}
     </div>
   )
 }

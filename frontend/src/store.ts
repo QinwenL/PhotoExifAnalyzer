@@ -89,6 +89,7 @@ interface AppState {
   // UI state
   viewMode: 'grid' | 'list'
   selectedImages: Set<string>
+  selectedDetailImage: ScanResult | null
 
   // Actions
   setSelectedDirectory: (dir: string | null) => void
@@ -101,6 +102,7 @@ interface AppState {
   selectAllImages: () => void
   clearSelection: () => void
   setViewMode: (mode: 'grid' | 'list') => void
+  setSelectedDetailImage: (result: ScanResult | null) => void
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -116,6 +118,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   filterCriteria: { and_mode: false },
   viewMode: 'grid',
   selectedImages: new Set(),
+  selectedDetailImage: null,
 
   // Actions
   setSelectedDirectory: (dir) => set({ selectedDirectory: dir }),
@@ -201,4 +204,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   clearSelection: () => set({ selectedImages: new Set() }),
 
   setViewMode: (mode) => set({ viewMode: mode }),
+
+  setSelectedDetailImage: (result) => set({ selectedDetailImage: result }),
 }))
