@@ -255,19 +255,12 @@ fn export_statistics(results: Vec<ScanResult>) -> Result<ExportData, String> {
             let filename = r.path.file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "unknown".to_string());
-            
-            let camera = match (&r.exif.make, &r.exif.model) {
-                (Some(make), Some(model)) => Some(format!("{} {}", make, model)),
-                (Some(make), None) => Some(make.clone()),
-                (None, Some(model)) => Some(model.clone()),
-                _ => None,
-            };
 
             ExportImage {
                 path: r.path.to_string_lossy().to_string(),
                 filename,
                 size: r.file_size,
-                camera,
+                camera: r.exif.camera_name(),
                 lens: r.exif.lens_model,
                 focal_length: r.exif.focal_length,
                 aperture: r.exif.aperture,

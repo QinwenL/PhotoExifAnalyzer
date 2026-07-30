@@ -10,6 +10,7 @@ import { VirtualizedGrid, VirtualizedList } from './components/VirtualizedGrid'
 import { StatusBar } from './components/StatusBar'
 import { ConfirmDialog } from './components/ConfirmDialog'
 import { Thumbnail } from './components/Thumbnail'
+import { formatCamera } from '@/lib/utils'
 
 // Responsive grid columns based on container width
 function useGridColumns() {
@@ -344,7 +345,9 @@ function App() {
                       {detailMode === 'detailed' ? (
                         <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1">
                           {result.exif.make && (
-                            <span className="text-xs text-muted-foreground">{result.exif.make} {result.exif.model}</span>
+                            <span className="text-xs text-muted-foreground">
+                              {formatCamera(result.exif)}
+                            </span>
                           )}
                           {result.exif.lens_model && (
                             <span className="text-xs text-muted-foreground">{result.exif.lens_model}</span>

@@ -82,12 +82,13 @@ pub fn calculate_camera_stats(results: &[ScanResult]) -> CameraStats {
     let mut counts: HashMap<String, usize> = HashMap::new();
 
     for result in results {
-        if let Some(ref make) = result.exif.make {
-            if let Some(ref model) = result.exif.model {
-                let key = format!("{} {}", make, model);
-                *counts.entry(key).or_insert(0) += 1;
-            } else {
-                *counts.entry(make.clone()).or_insert(0) += 1;
+        // Only count results that have at least a `make` — this preserves
+        // the pre-existing behavior where a model-only entry (e.g. iPhone)
+        // is NOT included in camera stats. `camera_name()` returns the
+        // combined "make model" or "make" alone when model is missing.
+        if result.exif.make.is_some() {
+            if let Some(name) = result.exif.camera_name() {
+                *counts.entry(name).or_insert(0) += 1;
             }
         }
     }

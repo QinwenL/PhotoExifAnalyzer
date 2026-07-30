@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/tauri'
 import { listen } from '@tauri-apps/api/event'
 import { create } from 'zustand'
+import { formatCamera } from '@/lib/utils'
 
 // Types matching Rust backend
 export interface ExifData {
@@ -496,8 +497,8 @@ function sortResults(
         comparison = a.file_size - b.file_size
         break
       case 'camera': {
-        const cameraA = a.exif.make && a.exif.model ? `${a.exif.make} ${a.exif.model}` : ''
-        const cameraB = b.exif.make && b.exif.model ? `${b.exif.make} ${b.exif.model}` : ''
+        const cameraA = formatCamera(a.exif) || ''
+        const cameraB = formatCamera(b.exif) || ''
         comparison = cameraA.localeCompare(cameraB)
         break
       }

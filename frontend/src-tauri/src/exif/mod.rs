@@ -62,6 +62,25 @@ impl ExifData {
             && self.iso.is_none()
             && self.exposure_time.is_none()
     }
+
+    /// Format the camera display name from make and model.
+    ///
+    /// - Both present → `"Canon EOS R5"`
+    /// - Only make    → `"Canon"`
+    /// - Only model   → `"iPhone 15 Pro"`
+    /// - Neither      → `None`
+    ///
+    /// This is the single source of truth for the `make + model` formatting
+    /// that was previously duplicated in `stats::calculate_camera_stats`,
+    /// `stats::matches_criteria`, `lib::export_statistics`, and the frontend.
+    pub fn camera_name(&self) -> Option<String> {
+        match (&self.make, &self.model) {
+            (Some(make), Some(model)) => Some(format!("{} {}", make, model)),
+            (Some(make), None) => Some(make.clone()),
+            (None, Some(model)) => Some(model.clone()),
+            (None, None) => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -104,5 +123,39 @@ mod tests {
         };
 
         assert!(!exif.is_empty());
+    }
+
+    #[test]
+    fn test_camera_name_both_make_and_model() {
+        let exif = ExifData {
+            make: Some("Canon".to_string()),
+            model: Some("EOS R5".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(exif.camera_name().as_deref(), Some("Canon EOS R5"));
+    }
+
+    #[test]
+    fn test_camera_name_make_only() {
+        let exif = ExifData {
+            make: Some("Sigma".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(exif.camera_name().as_deref(), Some("Sigma"));
+    }
+
+    #[test]
+    fn test_camera_name_model_only() {
+        let exif = ExifData {
+            model: Some("iPhone 15 Pro".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(exif.camera_name().as_deref(), Some("iPhone 15 Pro"));
+    }
+
+    #[test]
+    fn test_camera_name_neither() {
+        let exif = ExifData::new();
+        assert!(exif.camera_name().is_none());
     }
 }

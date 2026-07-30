@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/tauri'
 import { useAppStore, type ScanResult } from '../store'
 import { Button } from '@/components/ui/button'
+import { formatCamera } from '@/lib/utils'
 
 interface ImageDetailProps {
   result: ScanResult
@@ -164,13 +165,6 @@ function ExifRow({ label, value }: { label: string; value?: string }) {
       </span>
     </div>
   )
-}
-
-function formatCamera(exif: { make?: string; model?: string }): string | undefined {
-  if (exif.make && exif.model) {
-    return `${exif.make} ${exif.model}`
-  }
-  return exif.make || exif.model
 }
 
 function formatExposureTime(time?: number): string | undefined {
