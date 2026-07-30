@@ -1,4 +1,5 @@
 pub mod parser;
+pub mod scanner;
 
 use serde::{Deserialize, Serialize};
 
