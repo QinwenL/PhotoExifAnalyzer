@@ -2,7 +2,7 @@ export class Semaphore {
   private available: number
   private readonly waiters: Array<() => void> = []
 
-  constructor(private readonly max: number) {
+  constructor(max: number) {
     this.available = max
   }
 

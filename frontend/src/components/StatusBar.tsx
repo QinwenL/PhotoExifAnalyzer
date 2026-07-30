@@ -10,6 +10,9 @@ export function StatusBar() {
     scanProgress,
     isDeleting,
     deleteProgress,
+    thumbnailPending,
+    thumbnailLoaded,
+    thumbnailErrors,
   } = useAppStore()
 
   return (
@@ -25,6 +28,12 @@ export function StatusBar() {
         )}
         {isDeleting && (
           <span className="text-destructive font-medium">删除中: {deleteProgress.toFixed(0)}%</span>
+        )}
+        {thumbnailPending > 0 && (
+          <span className="text-primary font-medium">
+            加载缩略图: {thumbnailLoaded} / {thumbnailLoaded + thumbnailPending}
+            {thumbnailErrors > 0 ? ` (失败 ${thumbnailErrors})` : ''}
+          </span>
         )}
       </div>
       <div className="flex items-center gap-4">

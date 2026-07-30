@@ -102,6 +102,11 @@ interface AppState {
   isDeleting: boolean
   deleteProgress: number
 
+  // Thumbnail loading progress
+  thumbnailPending: number
+  thumbnailLoaded: number
+  thumbnailErrors: number
+
   // Actions
   setSelectedDirectory: (dir: string | null) => void
   scanDirectory: (dir: string, recursive: boolean) => Promise<void>
@@ -124,6 +129,9 @@ interface AppState {
   filterByCamera: (camera: string) => void
   filterByLens: (lens: string) => void
   resetFilter: () => void
+  beginThumbnailLoad: (path: string) => void
+  completeThumbnailLoad: (path: string, ok: boolean) => void
+  resetThumbnailProgress: () => void
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -151,6 +159,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   detailMode: 'simple',
   isDeleting: false,
   deleteProgress: 0,
+  thumbnailPending: 0,
+  thumbnailLoaded: 0,
+  thumbnailErrors: 0,
 
   // Actions
   setSelectedDirectory: (dir) => {
@@ -162,6 +173,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   scanDirectory: async (dir, recursive) => {
     set({ isScanning: true, scanProgress: 0 })
+    get().resetThumbnailProgress()
     try {
       const results: ScanResult[] = await invoke('scan_images', { dir, recursive })
       set({
@@ -179,6 +191,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   scanDirectoryWithProgress: async (dir, recursive) => {
     set({ isScanning: true, scanProgress: 0 })
+    get().resetThumbnailProgress()
     try {
       const progressHandler = listen('scan_progress', (event) => {
         set({ scanProgress: event.payload as number })
@@ -388,6 +401,33 @@ export const useAppStore = create<AppState>((set, get) => ({
   resetFilter: () => {
     const { scanResults } = get()
     set({ filterCriteria: { and_mode: false }, filteredResults: scanResults })
+  },
+
+  beginThumbnailLoad: (path) => {
+    void path
+    const { thumbnailPending } = get()
+    set({ thumbnailPending: thumbnailPending + 1 })
+  },
+
+  completeThumbnailLoad: (path, ok) => {
+    void path
+    const { thumbnailPending, thumbnailLoaded, thumbnailErrors } = get()
+    const nextPending = Math.max(0, thumbnailPending - 1)
+    if (ok) {
+      set({
+        thumbnailPending: nextPending,
+        thumbnailLoaded: thumbnailLoaded + 1,
+      })
+    } else {
+      set({
+        thumbnailPending: nextPending,
+        thumbnailErrors: thumbnailErrors + 1,
+      })
+    }
+  },
+
+  resetThumbnailProgress: () => {
+    set({ thumbnailPending: 0, thumbnailLoaded: 0, thumbnailErrors: 0 })
   },
 }))
 

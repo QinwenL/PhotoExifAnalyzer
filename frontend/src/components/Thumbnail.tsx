@@ -12,32 +12,37 @@ interface ThumbnailProps {
 export function Thumbnail({ path, maxSize = 200, className = '' }: ThumbnailProps) {
   const [src, setSrc] = useState<string | null>(null)
   const [error, setError] = useState(false)
-  const { beginThumbnailLoad, completeThumbnailLoad } = useAppStore()
 
   useEffect(() => {
     let cancelled = false
+    let settled = false
 
-    beginThumbnailLoad(path)
+    const begin = useAppStore.getState().beginThumbnailLoad
+    const complete = useAppStore.getState().completeThumbnailLoad
+    begin(path)
 
     withThumbnailSlot(() => invoke<string>('get_image_data', { path, maxSize }))
       .then((data) => {
-        if (!cancelled) setSrc(data)
-        if (!cancelled) completeThumbnailLoad(path, true)
+        if (cancelled || settled) return
+        settled = true
+        setSrc(data)
+        complete(path, true)
       })
       .catch(() => {
-        if (!cancelled) {
-          setError(true)
-          completeThumbnailLoad(path, false)
-        }
+        if (cancelled || settled) return
+        settled = true
+        setError(true)
+        complete(path, false)
       })
 
     return () => {
       cancelled = true
-      if (!src && !error) {
-        completeThumbnailLoad(path, false)
+      if (!settled) {
+        settled = true
+        complete(path, false)
       }
     }
-  }, [path, maxSize, beginThumbnailLoad, completeThumbnailLoad, src, error])
+  }, [path, maxSize])
 
   if (error) {
     return (
