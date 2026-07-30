@@ -19,8 +19,7 @@
       "fs": {
         "all": false,
         "readFile": true,
-        "readDir": true,
-        "stat": true
+        "readDir": true
       },
       "path": {
         "all": true
@@ -29,13 +28,7 @@
     "bundle": {
       "active": true,
       "identifier": "com.photo-exif-analyzer.app",
-      "icon": [
-        "icons/32x32.png",
-        "icons/128x128.png",
-        "icons/128x128@2x.png",
-        "icons/icon.icns",
-        "icons/icon.ico"
-      ]
+      "icon": []
     },
     "security": {
       "csp": null
