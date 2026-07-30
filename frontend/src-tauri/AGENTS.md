@@ -7,11 +7,11 @@ Rust 后端，通过 Tauri 命令暴露给前端。
 ```
 src-tauri/
 ├── src/
-│   ├── lib.rs          # 13 个 Tauri 命令 + 全局状态
+│   ├── lib.rs          # 10 个 Tauri 命令 + 全局状态 + 8 个单元测试（mod tests）
 │   ├── main.rs         # 入口（Windows 子系统隐藏）
 │   └── exif/           # 核心业务逻辑（见 exif/AGENTS.md）
 ├── tests/
-│   └── integration_test.rs  # 9 个集成测试
+│   └── integration_test.rs  # 10 个集成测试（含 1 个 #[ignore] 性能基准）
 ├── Cargo.toml          # 依赖：kamadak-exif, rayon, rusqlite, trash
 └── tauri.conf.json     # Tauri 配置：allowlist, 窗口, 打包
 ```
@@ -38,10 +38,7 @@ src-tauri/
 | `delete_image` | 单文件删除 | `ImageDetail.tsx` ✅ |
 | `delete_images_with_progress` | 批量删除+进度 | `store.ts` ✅ |
 | `get_image_data` | Base64 缩略图 | `Thumbnail.tsx` ✅ |
-| `scan_images` | 基础扫描 | ⚠️ 未使用 |
-| `delete_images` | 批量删除 | ⚠️ 未使用 |
-| `get_thumbnail` | 缩略图路径 | ⚠️ 未使用 |
-| `export_statistics` | JSON 导出 | ⚠️ 未使用 |
+| `export_statistics` | JSON 导出 | `store.ts` ✅ |
 
 ## CONVENTIONS
 
@@ -50,5 +47,4 @@ src-tauri/
 
 ## ANTI-PATTERNS
 
-- **3 个未使用命令**：`delete_images`、`get_thumbnail`、`export_statistics`（`scan_images` 在 store 有 action 但无组件调用）
 - **Bundle icon 为空**：`"icon": []`（生产打包需配置）

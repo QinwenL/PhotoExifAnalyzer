@@ -12,10 +12,12 @@ frontend/
 │   ├── store.ts       # Zustand 全局状态（所有 invoke 调用）
 │   ├── main.tsx       # 入口，StrictMode
 │   ├── components/    # UI 组件
-│   └── lib/           # 工具函数（cn()）
+│   ├── lib/           # 工具函数（cn() + Semaphore）
+│   └── __tests__/     # Vitest 单元测试
 ├── index.html         # Vite 入口 HTML
-├── package.json       # 依赖和脚本
+├── package.json       # 依赖和脚本（test/test:watch via vitest）
 ├── vite.config.ts     # Vite 配置（@ 别名，端口 5173）
+├── vitest.config.ts   # Vitest 配置
 ├── tsconfig.app.json  # TS 严格配置
 ├── eslint.config.js   # ESLint flat config
 ├── .prettierrc        # Prettier：无分号，单引号，100 宽
@@ -37,9 +39,11 @@ frontend/
 
 - **组件文件**：PascalCase（`FilterPanel.tsx`）
 - **工具函数**：camelCase（`lib/utils.ts`）
-- **类型定义**：在 `store.ts` 顶部（手动镜像 Rust 类型）
+- **类型定义**：在 `store.ts` 顶部（手动镜像 Rust 类型，`ExportData` / `ExportImage` 含注释标注镜像来源）
+- **导出**：`store.ts` 的 `exportToJSON` 委托后端 `export_statistics` 命令，逻辑只在 Rust 一处实现
+- **测试**：Vitest，`npm run test`（run）/ `npm run test:watch`
 - 格式化约定（无分号、单引号、100 宽）见根目录 AGENTS.md
 
 ## ANTI-PATTERNS
 
-- **导出重复**：`export_statistics`（Rust）和 `exportToJSON`（TS）是两套独立实现
+（无）
