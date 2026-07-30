@@ -41,6 +41,8 @@ function App() {
   const {
     isScanning,
     scanProgress,
+    scanProcessed,
+    scanTotal,
     filteredResults,
     cameraStats,
     lensStats,
@@ -510,7 +512,12 @@ function App() {
                   style={{ width: `${scanProgress}%` }}
                 />
               </div>
-              <p className="text-xs text-muted-foreground">{scanProgress.toFixed(0)}%</p>
+              {/* P2.2: 显示 "已扫描 N / M (xx%)"，payload 未到达时回退到纯百分比 */}
+              <p className="text-xs text-muted-foreground">
+                {scanProcessed !== null && scanTotal !== null
+                  ? `已扫描 ${scanProcessed} / ${scanTotal} (${scanProgress.toFixed(0)}%)`
+                  : `${scanProgress.toFixed(0)}%`}
+              </p>
               <Button variant="outline" size="sm" className="mt-4" onClick={cancelScan}>
                 取消扫描
               </Button>

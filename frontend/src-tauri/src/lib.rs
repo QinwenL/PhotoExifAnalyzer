@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use exif::cache::ExifCache;
-use exif::scanner::{scan_directory_with_cache, ScanResult};
+use exif::scanner::{scan_directory_with_cache, ScanProgressPayload, ScanResult};
 use exif::stats::{
     calculate_all_stats, calculate_camera_stats, calculate_focal_length_stats,
     calculate_lens_stats, filter_results, AllStats, CameraStats, FilterCriteria,
@@ -84,8 +84,8 @@ async fn scan_images_with_progress(
             // rate-limited layer so we don't cross the Tauri IPC boundary
             // once per file (10k files = 10k IPC calls = significant lag).
             // The wrapper guarantees a final 100% emit.
-            throttled_progress(move |pct| {
-                let _ = window.emit("scan_progress", pct);
+            throttled_progress(move |payload: ScanProgressPayload| {
+                let _ = window.emit("scan_progress", payload);
             }),
             move || *cancelled.lock().unwrap(),
         )
@@ -107,9 +107,9 @@ async fn scan_images_with_progress(
 /// Without this, 10k cached files produce 10k `window.emit` IPC calls, which
 /// floods the webview event loop and makes the scan *appear* slow even though
 /// the backend work finishes quickly.
-fn throttled_progress<F: Fn(f64) + Send + Sync + 'static>(
+fn throttled_progress<F: Fn(ScanProgressPayload) + Send + Sync + 'static>(
     callback: F,
-) -> impl Fn(f64) + Send + Sync + 'static {
+) -> impl Fn(ScanProgressPayload) + Send + Sync + 'static {
     const MIN_PROGRESS_INTERVAL_MS: u128 = 100;
     let last_emit = Arc::new(Mutex::new(
         std::time::Instant::now()
@@ -119,13 +119,13 @@ fn throttled_progress<F: Fn(f64) + Send + Sync + 'static>(
             .unwrap_or_else(std::time::Instant::now),
     ));
 
-    move |pct| {
+    move |payload: ScanProgressPayload| {
         let should_emit = {
             let mut guard = last_emit.lock().unwrap();
             let now = std::time::Instant::now();
             // Always emit 0% (first call), 100% (final call), or if enough
             // wall-clock time has elapsed since the last emission.
-            if pct <= 0.0 || pct >= 100.0
+            if payload.percentage <= 0.0 || payload.percentage >= 100.0
                 || now.duration_since(*guard).as_millis() >= MIN_PROGRESS_INTERVAL_MS
             {
                 *guard = now;
@@ -135,7 +135,7 @@ fn throttled_progress<F: Fn(f64) + Send + Sync + 'static>(
             }
         };
         if should_emit {
-            callback(pct);
+            callback(payload);
         }
     }
 }

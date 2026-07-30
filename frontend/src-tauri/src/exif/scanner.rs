@@ -63,6 +63,32 @@ impl ScanProgress {
             (self.processed as f64 / self.total as f64) * 100.0
         }
     }
+
+    /// Build a serializable snapshot of the current progress.
+    /// Used by the progress callback so the frontend can display
+    /// "scanned N / M" alongside the percentage.
+    fn to_payload(&self) -> ScanProgressPayload {
+        ScanProgressPayload {
+            processed: self.processed,
+            total: self.total,
+            percentage: self.percentage(),
+        }
+    }
+}
+
+/// Progress payload emitted by the scanner to the frontend.
+///
+/// Serialized across the Tauri IPC boundary as the `scan_progress` event
+/// payload. Carries `processed` and `total` so the UI can display
+/// "scanned N / M" rather than only a bare percentage.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct ScanProgressPayload {
+    pub processed: usize,
+    pub total: usize,
+    /// 0.0–100.0 inclusive. Redundant with processed/total but kept so
+    /// the frontend doesn't have to recompute it (and risk divide-by-zero
+    /// when total == 0).
+    pub percentage: f64,
 }
 
 pub fn scan_directory<P: AsRef<Path>>(dir: P, recursive: bool) -> Vec<ScanResult> {
@@ -75,7 +101,31 @@ pub fn scan_directory_with_callback<P: AsRef<Path>>(
     progress_callback: impl Fn(f64) + Send + Sync + 'static,
     cancel_check: impl Fn() -> bool + Send + Sync + 'static,
 ) -> Vec<ScanResult> {
-    scan_directory_with_cache(dir, recursive, None, progress_callback, cancel_check)
+    // Adapt the legacy f64-only callback into the payload-based callback
+    // expected by `scan_directory_with_cache`. This preserves the existing
+    // public API (many tests rely on `Fn(f64)`) while letting the inner
+    // scan loop emit rich progress with processed/total counts.
+    scan_directory_with_cache(
+        dir,
+        recursive,
+        None,
+        move |payload: ScanProgressPayload| progress_callback(payload.percentage),
+        cancel_check,
+    )
+}
+
+/// Like `scan_directory_with_cache` but accepts a payload-based callback
+/// that receives `processed`/`total`/`percentage`. Used by the Tauri
+/// command layer to forward full progress info to the frontend so the UI
+/// can display "scanned N / M".
+pub fn scan_directory_with_payload_progress<P: AsRef<Path>>(
+    dir: P,
+    recursive: bool,
+    cache: Option<Arc<Mutex<ExifCache>>>,
+    progress_callback: impl Fn(ScanProgressPayload) + Send + Sync + 'static,
+    cancel_check: impl Fn() -> bool + Send + Sync + 'static,
+) -> Vec<ScanResult> {
+    scan_directory_with_cache(dir, recursive, cache, progress_callback, cancel_check)
 }
 
 /// Phase 1 of two-phase scan: walk a directory and return image file paths
@@ -116,13 +166,15 @@ pub fn scan_directory_quick<P: AsRef<Path>>(dir: P, recursive: bool) -> Vec<Path
 /// * `dir` - Directory to scan
 /// * `recursive` - Whether to scan subdirectories
 /// * `cache` - Optional EXIF cache (wrapped in `Arc<Mutex<ExifCache>>` for thread safety)
-/// * `progress_callback` - Called with progress percentage (0-100)
+/// * `progress_callback` - Called with a `ScanProgressPayload` carrying
+///   `processed`/`total`/`percentage` so the frontend can display
+///   "scanned N / M" alongside the percentage bar.
 /// * `cancel_check` - Returns true if the scan should be cancelled
 pub fn scan_directory_with_cache<P: AsRef<Path>>(
     dir: P,
     recursive: bool,
     cache: Option<Arc<Mutex<ExifCache>>>,
-    progress_callback: impl Fn(f64) + Send + Sync + 'static,
+    progress_callback: impl Fn(ScanProgressPayload) + Send + Sync + 'static,
     cancel_check: impl Fn() -> bool + Send + Sync + 'static,
 ) -> Vec<ScanResult> {
     let dir = dir.as_ref();
@@ -134,6 +186,10 @@ pub fn scan_directory_with_cache<P: AsRef<Path>>(
     let total_files = image_paths.len();
     let progress = Arc::new(RwLock::new(ScanProgress::new(total_files)));
     let results = Arc::new(Mutex::new(Vec::with_capacity(total_files)));
+
+    // Emit an initial 0/N payload so the frontend can render the
+    // "0 / N" baseline before the first file is processed.
+    progress_callback(progress.read().unwrap().to_payload());
 
     // Collect cache-miss EXIF payloads per-thread via a thread-safe collector
     // so we can do a SINGLE bulk SQLite INSERT after the parallel parse
@@ -171,7 +227,7 @@ pub fn scan_directory_with_cache<P: AsRef<Path>>(
 
             let mut p = progress.write().unwrap();
             p.increment();
-            progress_callback(p.percentage());
+            progress_callback(p.to_payload());
         });
     });
 
@@ -401,7 +457,7 @@ mod tests {
             temp_dir.path(),
             true,
             Some(cache),
-            move |p| progress_clone.lock().unwrap().push(p),
+            move |p: ScanProgressPayload| progress_clone.lock().unwrap().push(p.percentage),
             || false,
         );
 
@@ -590,5 +646,73 @@ mod tests {
     fn test_quick_scan_nonexistent_dir_returns_empty() {
         let paths = scan_directory_quick("/nonexistent/path", true);
         assert!(paths.is_empty());
+    }
+
+    // ---- Rich progress payload (P2.2: scanned / total) ----
+
+    #[test]
+    fn test_scan_emits_payload_with_processed_and_total() {
+        // P2.2: the progress callback must receive a ScanProgressPayload
+        // carrying `processed` and `total` counts (not just a bare f64
+        // percentage) so the UI can render "scanned N / M".
+        let temp_dir = TempDir::new().unwrap();
+        for i in 0..5 {
+            create_test_image(temp_dir.path(), &format!("img{i}.jpg"));
+        }
+
+        let payloads: Arc<Mutex<Vec<ScanProgressPayload>>> = Arc::new(Mutex::new(Vec::new()));
+        let payloads_clone = Arc::clone(&payloads);
+
+        let results = scan_directory_with_cache(
+            temp_dir.path(),
+            true,
+            None,
+            move |p| payloads_clone.lock().unwrap().push(p),
+            || false,
+        );
+
+        assert_eq!(results.len(), 5);
+
+        let captured = payloads.lock().unwrap();
+        assert!(!captured.is_empty(), "progress callback must be invoked");
+
+        // The very first emission is the 0/N baseline emitted before any
+        // file is processed.
+        let first = captured[0];
+        assert_eq!(first.total, 5, "total must be the image count");
+        assert_eq!(first.processed, 0, "first payload must be the 0/N baseline");
+        assert_eq!(first.percentage, 0.0);
+
+        // The last emission must reflect all 5 files processed.
+        let last = *captured.last().unwrap();
+        assert_eq!(last.total, 5);
+        assert_eq!(last.processed, 5);
+        assert_eq!(last.percentage, 100.0);
+    }
+
+    #[test]
+    fn test_scan_payload_progress_carries_total_zero_for_empty_dir() {
+        // Empty directory → total == 0, processed == 0, percentage == 0.
+        // The frontend uses this to render "0 / 0" instead of crashing
+        // on a divide-by-zero.
+        let temp_dir = TempDir::new().unwrap();
+
+        let payloads: Arc<Mutex<Vec<ScanProgressPayload>>> = Arc::new(Mutex::new(Vec::new()));
+        let payloads_clone = Arc::clone(&payloads);
+
+        let _ = scan_directory_with_cache(
+            temp_dir.path(),
+            true,
+            None,
+            move |p| payloads_clone.lock().unwrap().push(p),
+            || false,
+        );
+
+        let captured = payloads.lock().unwrap();
+        assert!(!captured.is_empty());
+        let first = captured[0];
+        assert_eq!(first.total, 0);
+        assert_eq!(first.processed, 0);
+        assert_eq!(first.percentage, 0.0);
     }
 }

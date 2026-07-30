@@ -21,6 +21,8 @@ describe('error reporting to UI', () => {
       errorMessage: null,
       isScanning: false,
       scanProgress: 0,
+      scanProcessed: null,
+      scanTotal: null,
       scanResults: [],
       filteredResults: [],
       selectedImages: new Set(),

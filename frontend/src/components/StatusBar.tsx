@@ -8,6 +8,8 @@ export function StatusBar() {
     selectedDirectory,
     isScanning,
     scanProgress,
+    scanProcessed,
+    scanTotal,
     isDeleting,
     deleteProgress,
     thumbnailPending,
@@ -19,6 +21,13 @@ export function StatusBar() {
   const thumbPct =
     totalThumbWork > 0 ? Math.min(100, (thumbnailLoaded / totalThumbWork) * 100) : 0
 
+  // P2.2: 显示 "扫描中: N / M (xx%)" — 当后端尚未 emit payload 时（scanTotal
+  // 为 null）回退到只显示百分比，避免出现 "扫描中:  /  (xx%)" 的空值。
+  const scanCountLabel =
+    scanProcessed !== null && scanTotal !== null
+      ? `扫描中: ${scanProcessed} / ${scanTotal} (${scanProgress.toFixed(0)}%)`
+      : `扫描中: ${scanProgress.toFixed(0)}%`
+
   return (
     <div className="fixed bottom-0 left-0 right-0 border-t border-border bg-background/95 backdrop-blur px-4 py-1.5 flex items-center justify-between text-xs text-muted-foreground z-40">
       <div className="flex items-center gap-4">
@@ -28,7 +37,7 @@ export function StatusBar() {
           <span className="text-primary font-medium">已选: {selectedImages.size} 张</span>
         )}
         {isScanning && (
-          <span className="text-primary font-medium">扫描中: {scanProgress.toFixed(0)}%</span>
+          <span className="text-primary font-medium">{scanCountLabel}</span>
         )}
         {isDeleting && (
           <span className="text-destructive font-medium">删除中: {deleteProgress.toFixed(0)}%</span>

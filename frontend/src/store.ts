@@ -105,12 +105,24 @@ export interface ExportData {
   images: ExportImage[]
 }
 
+// Scan progress payload emitted by the Rust backend.
+// Mirrors `ScanProgressPayload` in `src-tauri/src/exif/scanner.rs`.
+// Carries processed/total so the UI can display "scanned N / M".
+export interface ScanProgressPayload {
+  processed: number
+  total: number
+  percentage: number
+}
+
 // App state
 interface AppState {
   // Directory
   selectedDirectory: string | null
   isScanning: boolean
   scanProgress: number
+  // P2.2: 已扫描 / 总数。null 表示当前未在扫描或后端尚未 emit 任何 payload。
+  scanProcessed: number | null
+  scanTotal: number | null
 
   // 用户可见的错误消息（null 表示无错误）。捕获原本只 console.error
   // 的失败（扫描失败、取消失败、图片加载失败等），让 UI 能向用户反馈。
@@ -189,6 +201,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   })(),
   isScanning: false,
   scanProgress: 0,
+  scanProcessed: null,
+  scanTotal: null,
   errorMessage: null,
   clearErrorMessage: () => set({ errorMessage: null }),
   scanResults: [],
@@ -224,7 +238,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   scanDirectoryWithProgress: async (dir, recursive) => {
-    set({ isScanning: true, scanProgress: 0 })
+    set({ isScanning: true, scanProgress: 0, scanProcessed: null, scanTotal: null })
     // Same rationale as scanDirectory (see comment above): rotate the
     // thumbnail epoch so stale-skeleton tiles re-fire their load effect
     // and in-flight completes from the cancelled previous batch are
@@ -232,7 +246,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     get().resetThumbnailProgress()
     try {
       const progressHandler = listen('scan_progress', (event) => {
-        set({ scanProgress: event.payload as number })
+        const payload = event.payload as ScanProgressPayload
+        set({
+          scanProgress: payload.percentage,
+          scanProcessed: payload.processed,
+          scanTotal: payload.total,
+        })
       })
 
       const results: ScanResult[] = await invoke('scan_images_with_progress', { dir, recursive })
@@ -242,6 +261,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         filteredResults: results,
         isScanning: false,
         scanProgress: 100,
+        scanProcessed: results.length,
+        scanTotal: results.length,
       })
       get().updateStatistics()
     } catch (error) {
@@ -256,7 +277,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   cancelScan: async () => {
     try {
       await invoke('cancel_scan')
-      set({ isScanning: false, scanProgress: 0 })
+      set({ isScanning: false, scanProgress: 0, scanProcessed: null, scanTotal: null })
     } catch (error) {
       console.error('Cancel scan failed:', error)
       set({
