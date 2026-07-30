@@ -71,6 +71,8 @@ pub struct FilterCriteria {
     pub iso: Option<(u32, u32)>,
     /// Exposure time range (min, max) in seconds
     pub exposure_time: Option<(f64, f64)>,
+    /// Date range (start, end) in ISO format (YYYY-MM-DD)
+    pub date_range: Option<(String, String)>,
     /// Filter mode: true = AND (all conditions must match), false = OR (any condition)
     pub and_mode: bool,
 }
@@ -243,6 +245,15 @@ fn matches_criteria(exif: &ExifData, criteria: &FilterCriteria) -> bool {
         checks.push(matches);
     }
 
+    // Date range filter
+    if let Some((ref start, ref end)) = criteria.date_range {
+        let matches = exif.datetime_original.as_ref().map(|dt| {
+            let date_part = dt.split('T').next().unwrap_or(dt);
+            date_part >= start.as_str() && date_part <= end.as_str()
+        }).unwrap_or(false);
+        checks.push(matches);
+    }
+
     if checks.is_empty() {
         return true;
     }
@@ -355,5 +366,29 @@ mod tests {
 
         let filtered = filter_results(&results, &criteria);
         assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
+    fn test_filter_date_range() {
+        let mut r1 = create_test_result("Canon", "EOS R5", "RF 50mm", 50.0);
+        r1.exif.datetime_original = Some("2024-01-15T10:30:00".to_string());
+
+        let mut r2 = create_test_result("Canon", "EOS R5", "RF 50mm", 50.0);
+        r2.exif.datetime_original = Some("2024-02-20T14:00:00".to_string());
+
+        let mut r3 = create_test_result("Canon", "EOS R5", "RF 50mm", 50.0);
+        r3.exif.datetime_original = Some("2024-03-10T09:15:00".to_string());
+
+        let results = vec![r1, r2, r3];
+
+        let criteria = FilterCriteria {
+            date_range: Some(("2024-02-01".to_string(), "2024-02-28".to_string())),
+            and_mode: true,
+            ..Default::default()
+        };
+
+        let filtered = filter_results(&results, &criteria);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].exif.datetime_original.as_deref(), Some("2024-02-20T14:00:00"));
     }
 }
