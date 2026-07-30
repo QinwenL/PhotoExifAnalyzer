@@ -351,10 +351,20 @@ fn delete_image(path: String) -> Result<(), String> {
     result
 }
 
+/// P2.3: Payload emitted via the `delete_progress` Tauri event.
+/// Mirrors `ScanProgressPayload` so the frontend can render
+/// "已完成 N / M" progress bars with the same shape it uses for scans.
+#[derive(Debug, Clone, Serialize)]
+struct DeleteProgressPayload {
+    processed: usize,
+    total: usize,
+    percentage: f64,
+}
+
 #[tauri::command]
 fn delete_images_with_progress(window: tauri::Window, paths: Vec<String>) -> Vec<Result<(), String>> {
-    let total = paths.len() as f64;
-    let mut results = Vec::with_capacity(paths.len());
+    let total = paths.len();
+    let mut results = Vec::with_capacity(total);
     let mut to_cleanup: Vec<String> = Vec::new();
 
     for (i, path_str) in paths.iter().enumerate() {
@@ -368,8 +378,23 @@ fn delete_images_with_progress(window: tauri::Window, paths: Vec<String>) -> Vec
 
         results.push(file_result);
 
-        let progress = ((i + 1) as f64 / total) * 100.0;
-        let _ = window.emit("delete_progress", progress);
+        let processed = i + 1;
+        // P2.3: emit a structured payload (processed/total/percentage) so
+        // the StatusBar can render "N / M" directly. The frontend also
+        // tolerates the legacy bare-number payload for backward compat.
+        let percentage = if total == 0 {
+            100.0
+        } else {
+            (processed as f64 / total as f64) * 100.0
+        };
+        let _ = window.emit(
+            "delete_progress",
+            DeleteProgressPayload {
+                processed,
+                total,
+                percentage,
+            },
+        );
     }
 
     // Offload cache cleanup to background thread so UI returns immediately

@@ -9,6 +9,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 }))
 
 import { invoke } from '@tauri-apps/api/tauri'
+import { listen } from '@tauri-apps/api/event'
 import { useAppStore, type ScanResult } from '../store'
 
 function makeResult(path: string): ScanResult {
@@ -38,6 +39,8 @@ describe('deleteSelectedImages', () => {
       lastSelectedIndex: null,
       isDeleting: false,
       deleteProgress: 0,
+      deleteProcessed: null,
+      deleteTotal: null,
     })
   })
 
@@ -129,5 +132,186 @@ describe('deleteSelectedImages', () => {
     // updateStatistics 内部会调用 invoke('get_all_stats', ...)
     const invokeCalls = vi.mocked(invoke).mock.calls.map((c) => c[0])
     expect(invokeCalls).toContain('get_all_stats')
+  })
+})
+
+/**
+ * P2.3: 删除进度条规格实现
+ *
+ * Spec (file-management/spec.md "批量操作进度"):
+ * - WHEN 用户删除超过 10 张图片
+ * - THEN 系统 SHALL 显示进度条
+ * - AND 进度条 SHALL 显示已完成数量/总数量
+ *
+ * 这些测试验证 store 在删除过程中跟踪 deleteProcessed / deleteTotal，
+ * 让 StatusBar 能渲染 "N / M" 格式的进度。
+ */
+describe('P2.3: delete progress counts', () => {
+  // 捕获 listen 注册的 delete_progress 回调，让测试能手动触发进度事件
+  let deleteProgressCallback: ((payload: unknown) => void) | null = null
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    deleteProgressCallback = null
+    vi.mocked(listen).mockImplementation(((event: string, cb: (e: { payload: unknown }) => void) => {
+      if (event === 'delete_progress') {
+        deleteProgressCallback = (payload: unknown) => cb({ payload })
+      }
+      return Promise.resolve(() => {})
+    }) as never)
+
+    useAppStore.setState({
+      scanResults: [],
+      filteredResults: [],
+      selectedImages: new Set(),
+      selectedDetailImage: null,
+      lastSelectedIndex: null,
+      isDeleting: false,
+      deleteProgress: 0,
+      deleteProcessed: null,
+      deleteTotal: null,
+      lastDeleteFailures: null,
+    })
+  })
+
+  it('删除开始时设置 deleteTotal 为选中数量，deleteProcessed 为 0', async () => {
+    const paths = Array.from({ length: 15 }, (_, i) => `/img_${i}.jpg`)
+    const results = paths.map(makeResult)
+    useAppStore.setState({
+      scanResults: results,
+      filteredResults: results,
+      selectedImages: new Set(paths),
+    })
+
+    // 让 invoke pending 直到我们手动 resolve，使我们能观察到 "删除开始" 时的状态
+    let resolveInvoke!: (v: unknown[]) => void
+    vi.mocked(invoke).mockImplementation(
+      () => new Promise((res) => { resolveInvoke = res as (v: unknown[]) => void })
+    )
+
+    const promise = useAppStore.getState().deleteSelectedImages()
+
+    // 在 invoke resolve 之前检查状态 —— 此时 deleteSelectedImages 应已
+    // 同步设置 deleteTotal / deleteProcessed = 0。
+    const state = useAppStore.getState()
+    expect(state.isDeleting).toBe(true)
+    expect(state.deleteTotal).toBe(15)
+    expect(state.deleteProcessed).toBe(0)
+
+    // 清理：让 promise 落定
+    resolveInvoke(paths.map(() => ({ Ok: null })))
+    await promise
+  })
+
+  it('收到 delete_progress 事件时同时更新 deleteProcessed 和 deleteProgress', async () => {
+    const paths = Array.from({ length: 20 }, (_, i) => `/img_${i}.jpg`)
+    const results = paths.map(makeResult)
+    useAppStore.setState({
+      scanResults: results,
+      filteredResults: results,
+      selectedImages: new Set(paths),
+    })
+
+    // 让 invoke pending 直到我们手动 resolve
+    let resolveInvoke!: (v: unknown[]) => void
+    vi.mocked(invoke).mockImplementation(
+      () => new Promise((res) => { resolveInvoke = res as (v: unknown[]) => void })
+    )
+
+    const promise = useAppStore.getState().deleteSelectedImages()
+
+    // 模拟后端发来进度：10/20 完成 = 50%
+    deleteProgressCallback?.({ processed: 10, total: 20, percentage: 50 })
+    await Promise.resolve() // flush microtasks
+
+    let state = useAppStore.getState()
+    expect(state.deleteProgress).toBe(50)
+    expect(state.deleteProcessed).toBe(10)
+    expect(state.deleteTotal).toBe(20)
+
+    // 模拟后端发来 100% 进度
+    deleteProgressCallback?.({ processed: 20, total: 20, percentage: 100 })
+    await Promise.resolve()
+
+    state = useAppStore.getState()
+    expect(state.deleteProgress).toBe(100)
+    expect(state.deleteProcessed).toBe(20)
+
+    // 完成 invoke，清理
+    resolveInvoke(paths.map(() => ({ Ok: null })))
+    await promise
+  })
+
+  it('删除完成后复位 deleteProcessed 和 deleteTotal', async () => {
+    const paths = Array.from({ length: 12 }, (_, i) => `/img_${i}.jpg`)
+    const results = paths.map(makeResult)
+    useAppStore.setState({
+      scanResults: results,
+      filteredResults: results,
+      selectedImages: new Set(paths),
+    })
+
+    vi.mocked(invoke).mockResolvedValue(paths.map(() => ({ Ok: null })) as never)
+
+    await useAppStore.getState().deleteSelectedImages()
+
+    const state = useAppStore.getState()
+    expect(state.isDeleting).toBe(false)
+    // 完成后 processed/total 应清空（null），不再显示进度
+    expect(state.deleteProcessed).toBeNull()
+    expect(state.deleteTotal).toBeNull()
+  })
+
+  it('删除失败时也复位 deleteProcessed 和 deleteTotal', async () => {
+    const paths = Array.from({ length: 12 }, (_, i) => `/img_${i}.jpg`)
+    const results = paths.map(makeResult)
+    useAppStore.setState({
+      scanResults: results,
+      filteredResults: results,
+      selectedImages: new Set(paths),
+    })
+
+    vi.mocked(invoke).mockRejectedValue(new Error('IPC failure'))
+
+    await useAppStore.getState().deleteSelectedImages()
+
+    const state = useAppStore.getState()
+    expect(state.isDeleting).toBe(false)
+    expect(state.deleteProcessed).toBeNull()
+    expect(state.deleteTotal).toBeNull()
+    expect(state.errorMessage).toContain('删除失败')
+  })
+
+  it('兼容旧版后端只发百分比数字的 payload', async () => {
+    // 旧版后端 emit 的是裸数字（百分比），没有 processed/total 字段。
+    // store 必须仍能从百分比 + 已知 deleteTotal 推导出 deleteProcessed，
+    // 保证升级时不丢失进度显示。
+    const paths = Array.from({ length: 20 }, (_, i) => `/img_${i}.jpg`)
+    const results = paths.map(makeResult)
+    useAppStore.setState({
+      scanResults: results,
+      filteredResults: results,
+      selectedImages: new Set(paths),
+    })
+
+    let resolveInvoke!: (v: unknown[]) => void
+    vi.mocked(invoke).mockImplementation(
+      () => new Promise((res) => { resolveInvoke = res as (v: unknown[]) => void })
+    )
+
+    const promise = useAppStore.getState().deleteSelectedImages()
+
+    // 旧版 payload：裸数字 50（表示 50%）
+    deleteProgressCallback?.(50)
+    await Promise.resolve()
+
+    const state = useAppStore.getState()
+    expect(state.deleteProgress).toBe(50)
+    // 50% of 20 = 10
+    expect(state.deleteProcessed).toBe(10)
+    expect(state.deleteTotal).toBe(20)
+
+    resolveInvoke(paths.map(() => ({ Ok: null })))
+    await promise
   })
 })

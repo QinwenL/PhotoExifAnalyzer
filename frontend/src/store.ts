@@ -161,6 +161,13 @@ interface AppState {
   // Delete progress
   isDeleting: boolean
   deleteProgress: number
+  /**
+   * P2.3: 已删除 / 总数。null 表示当前未在删除或后端尚未 emit 任何 payload。
+   * StatusBar 用这两个值渲染 "N / M" 格式的进度条（仅当 deleteTotal > 10
+   * 时显示进度条，详见 file-management/spec.md "批量操作进度"）。
+   */
+  deleteProcessed: number | null
+  deleteTotal: number | null
   /** 最近一次批量删除中失败的路径与错误消息（null 表示无失败或未删除） */
   lastDeleteFailures: Array<{ path: string; error: string }> | null
 
@@ -244,6 +251,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   detailMode: 'simple',
   isDeleting: false,
   deleteProgress: 0,
+  deleteProcessed: null,
+  deleteTotal: null,
   lastDeleteFailures: null,
   thumbnailEpoch: 0,
   thumbnailPending: 0,
@@ -343,13 +352,34 @@ export const useAppStore = create<AppState>((set, get) => ({
     const { selectedImages, scanResults } = get()
     if (selectedImages.size === 0) return
 
-    set({ isDeleting: true, deleteProgress: 0 })
-
-    const progressHandler = listen('delete_progress', (event) => {
-      set({ deleteProgress: event.payload as number })
+    const paths = Array.from(selectedImages)
+    // P2.3: 在删除开始时就设置 deleteTotal / deleteProcessed = 0，让
+    // StatusBar 能立即渲染 "0 / N" 进度条（即使后端尚未 emit 任何事件）。
+    set({
+      isDeleting: true,
+      deleteProgress: 0,
+      deleteProcessed: 0,
+      deleteTotal: paths.length,
     })
 
-    const paths = Array.from(selectedImages)
+    const progressHandler = listen('delete_progress', (event) => {
+      // P2.3: 兼容两种 payload 格式：
+      //  - 新版：{ processed, total, percentage }（与 ScanProgressPayload 对齐）
+      //  - 旧版：裸数字（百分比）。此时从 deleteTotal 推导 processed。
+      const payload = event.payload as
+        | number
+        | { processed?: number; total?: number; percentage?: number }
+      if (typeof payload === 'number') {
+        const total = get().deleteTotal ?? paths.length
+        const processed = Math.round((payload / 100) * total)
+        set({ deleteProgress: payload, deleteProcessed: processed })
+      } else if (payload && typeof payload === 'object') {
+        const percentage = payload.percentage ?? 0
+        const processed = payload.processed ?? Math.round((percentage / 100) * paths.length)
+        const total = payload.total ?? paths.length
+        set({ deleteProgress: percentage, deleteProcessed: processed, deleteTotal: total })
+      }
+    })
 
     try {
       // 后端返回 Vec<Result<(), String>>：每个元素对应一个路径的删除结果
@@ -372,6 +402,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         lastSelectedIndex: null,
         isDeleting: false,
         deleteProgress: 100,
+        // P2.3: 删除完成后清空计数，StatusBar 不再显示进度条
+        deleteProcessed: null,
+        deleteTotal: null,
         // 暴露失败信息供 UI 提示（如有）
         lastDeleteFailures: outcome.failedIndices.size > 0
           ? Array.from(outcome.failedIndices.entries()).map(([i, err]) => ({
@@ -390,6 +423,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({
         isDeleting: false,
         deleteProgress: 0,
+        // P2.3: 失败时也清空计数
+        deleteProcessed: null,
+        deleteTotal: null,
         errorMessage: `删除失败：${error instanceof Error ? error.message : String(error)}`,
       })
     }

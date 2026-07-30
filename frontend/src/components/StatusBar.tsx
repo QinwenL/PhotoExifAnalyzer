@@ -12,6 +12,8 @@ export function StatusBar() {
     scanTotal,
     isDeleting,
     deleteProgress,
+    deleteProcessed,
+    deleteTotal,
     thumbnailPending,
     thumbnailLoaded,
     thumbnailErrors,
@@ -28,6 +30,12 @@ export function StatusBar() {
       ? `扫描中: ${scanProcessed} / ${scanTotal} (${scanProgress.toFixed(0)}%)`
       : `扫描中: ${scanProgress.toFixed(0)}%`
 
+  // P2.3: spec 要求 "删除超过 10 张图片时显示进度条"。对于 ≤10 张的快速
+  // 删除，仅显示百分比文本（避免短暂闪烁的进度条）。>10 张时显示带
+  // "已完成 / 总数" 计数的视觉进度条。
+  const showDeleteProgressBar =
+    isDeleting && deleteTotal !== null && deleteTotal > 10
+
   return (
     <div className="fixed bottom-0 left-0 right-0 border-t border-border bg-background/95 backdrop-blur px-4 py-1.5 flex items-center justify-between text-xs text-muted-foreground z-40">
       <div className="flex items-center gap-4">
@@ -39,8 +47,24 @@ export function StatusBar() {
         {isScanning && (
           <span className="text-primary font-medium">{scanCountLabel}</span>
         )}
-        {isDeleting && (
+        {isDeleting && !showDeleteProgressBar && (
           <span className="text-destructive font-medium">删除中: {deleteProgress.toFixed(0)}%</span>
+        )}
+        {showDeleteProgressBar && (
+          <span
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+            className="text-destructive font-medium inline-flex items-center gap-2"
+          >
+            <span className="w-20 h-1.5 rounded-full bg-muted overflow-hidden shrink-0">
+              <span
+                className="block h-full bg-destructive transition-[width] duration-150"
+                style={{ width: `${deleteProgress}%` }}
+              />
+            </span>
+            删除中: {deleteProcessed} / {deleteTotal}
+          </span>
         )}
         {thumbnailPending > 0 && (
           <span
