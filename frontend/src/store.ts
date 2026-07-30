@@ -90,6 +90,7 @@ interface AppState {
   viewMode: 'grid' | 'list'
   selectedImages: Set<string>
   selectedDetailImage: ScanResult | null
+  lastSelectedIndex: number | null
 
   // Actions
   setSelectedDirectory: (dir: string | null) => void
@@ -98,7 +99,7 @@ interface AppState {
   setFilterCriteria: (criteria: FilterCriteria) => void
   applyFilter: () => void
   deleteSelectedImages: () => Promise<void>
-  toggleImageSelection: (path: string) => void
+  toggleImageSelection: (path: string, index: number, shiftKey: boolean, ctrlKey: boolean) => void
   selectAllImages: () => void
   clearSelection: () => void
   setViewMode: (mode: 'grid' | 'list') => void
@@ -119,6 +120,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   viewMode: 'grid',
   selectedImages: new Set(),
   selectedDetailImage: null,
+  lastSelectedIndex: null,
 
   // Actions
   setSelectedDirectory: (dir) => set({ selectedDirectory: dir }),
@@ -184,15 +186,36 @@ export const useAppStore = create<AppState>((set, get) => ({
     get().updateStatistics()
   },
 
-  toggleImageSelection: (path) => {
-    const { selectedImages } = get()
+  toggleImageSelection: (path, index, shiftKey, ctrlKey) => {
+    const { selectedImages, filteredResults, lastSelectedIndex } = get()
     const newSelection = new Set(selectedImages)
-    if (newSelection.has(path)) {
-      newSelection.delete(path)
+
+    if (shiftKey && lastSelectedIndex !== null) {
+      // Shift+click: select range from lastSelected to current
+      const start = Math.min(lastSelectedIndex, index)
+      const end = Math.max(lastSelectedIndex, index)
+      for (let i = start; i <= end; i++) {
+        if (i < filteredResults.length) {
+          newSelection.add(filteredResults[i].path)
+        }
+      }
+    } else if (ctrlKey) {
+      // Ctrl+click: toggle single item
+      if (newSelection.has(path)) {
+        newSelection.delete(path)
+      } else {
+        newSelection.add(path)
+      }
     } else {
+      // Normal click: clear selection and select only this item
+      newSelection.clear()
       newSelection.add(path)
     }
-    set({ selectedImages: newSelection })
+
+    set({
+      selectedImages: newSelection,
+      lastSelectedIndex: index,
+    })
   },
 
   selectAllImages: () => {

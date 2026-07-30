@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import { open } from '@tauri-apps/api/dialog'
 import { useAppStore } from './store'
 import { Button } from '@/components/ui/button'
@@ -25,6 +26,24 @@ function App() {
     clearSelection,
     setSelectedDetailImage,
   } = useAppStore()
+
+  // Delete key handler
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Delete' && selectedImages.size > 0 && !selectedDetailImage) {
+        const confirmed = window.confirm(`确定要将 ${selectedImages.size} 张图片移到回收站吗？`)
+        if (confirmed) {
+          deleteSelectedImages()
+        }
+      }
+      if (e.key === 'Escape' && selectedDetailImage) {
+        setSelectedDetailImage(null)
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [selectedImages.size, selectedDetailImage, deleteSelectedImages, setSelectedDetailImage])
 
   const handleSelectDirectory = async () => {
     const selected = await open({ directory: true, multiple: false })
@@ -157,7 +176,7 @@ function App() {
               <VirtualizedGrid
                 items={filteredResults}
                 columns={5}
-                renderItem={(result) => (
+                renderItem={(result, index) => (
                   <div
                     key={result.path}
                     className={`relative aspect-square border rounded-lg overflow-hidden cursor-pointer transition-all ${
@@ -165,7 +184,7 @@ function App() {
                         ? 'ring-2 ring-primary ring-offset-2'
                         : 'hover:ring-2 hover:ring-primary/50'
                     }`}
-                    onClick={() => useAppStore.getState().toggleImageSelection(result.path)}
+                    onClick={(e) => useAppStore.getState().toggleImageSelection(result.path, index, e.shiftKey, e.ctrlKey || e.metaKey)}
                     onDoubleClick={() => setSelectedDetailImage(result)}
                   >
                     <div className="absolute inset-0 bg-muted flex items-center justify-center">
@@ -184,13 +203,13 @@ function App() {
             ) : (
               <VirtualizedList
                 items={filteredResults}
-                renderItem={(result) => (
+                renderItem={(result, index) => (
                   <div
                     key={result.path}
                     className={`flex items-center gap-3 p-2 rounded cursor-pointer transition-colors h-12 ${
                       selectedImages.has(result.path) ? 'bg-primary/10' : 'hover:bg-muted'
                     }`}
-                    onClick={() => useAppStore.getState().toggleImageSelection(result.path)}
+                    onClick={(e) => useAppStore.getState().toggleImageSelection(result.path, index, e.shiftKey, e.ctrlKey || e.metaKey)}
                     onDoubleClick={() => setSelectedDetailImage(result)}
                   >
                     <input

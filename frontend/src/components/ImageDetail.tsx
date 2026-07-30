@@ -82,7 +82,7 @@ export function ImageDetail({ result, onClose }: ImageDetailProps) {
               <Button
                 size="sm"
                 variant={isSelected ? 'default' : 'outline'}
-                onClick={() => toggleImageSelection(result.path)}
+                onClick={() => toggleImageSelection(result.path, 0, false, false)}
               >
                 {isSelected ? '已选中' : '选择'}
               </Button>
