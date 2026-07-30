@@ -12,6 +12,7 @@ import { ConfirmDialog } from './components/ConfirmDialog'
 import { Thumbnail } from './components/Thumbnail'
 import { formatCamera } from '@/lib/utils'
 import { getKeyboardAction, isTextInputTarget } from '@/lib/keyboard'
+import { shouldAutoLoadLastDirectory, readLastDirectory } from '@/lib/auto-load'
 
 // Responsive grid columns based on container width
 function useGridColumns() {
@@ -111,6 +112,19 @@ function App() {
   useEffect(() => {
     setTheme(theme)
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Auto-load last scanned directory on mount (spec: desktop-ui/spec.md)
+  // 仅在挂载时触发一次：读取 localStorage 中的 lastDirectory，若存在则
+  // 发起递归扫描。store 初始化时已把 lastDirectory 读入 selectedDirectory，
+  // 这里只需触发扫描；失败由 scanDirectoryWithProgress 内部的 catch
+  // 设置 errorMessage，不会让应用卡死。
+  useEffect(() => {
+    const lastDir = readLastDirectory()
+    if (shouldAutoLoadLastDirectory(lastDir)) {
+      void scanDirectoryWithProgress(lastDir, true)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const handleSelectDirectory = async () => {
     const selected = await open({ directory: true, multiple: false })
