@@ -1,6 +1,7 @@
 # PhotoExifAnalyzer
 
 **Generated:** 2026-07-28
+**Updated:** 2026-07-31
 **Stack:** Tauri v1 + React 19 + Rust (edition 2021)
 
 ## OVERVIEW
@@ -14,13 +15,14 @@ PhotoExifAnalyzer/
 ├── frontend/
 │   ├── src-tauri/     # Rust 后端（Tauri 命令层）
 │   │   ├── src/
-│   │   │   ├── lib.rs        # 13 个 Tauri 命令 + 全局状态
+│   │   │   ├── lib.rs        # 10 个 Tauri 命令 + 全局状态 + 8 个单元测试
 │   │   │   ├── main.rs       # 入口，Windows 子系统隐藏
 │   │   │   └── exif/         # 核心模块（见 exif/AGENTS.md）
 │   │   └── tests/
-│   │       └── integration_test.rs
+│   │       └── integration_test.rs  # 10 个集成测试（含 1 个 #[ignore] 性能基准）
 │   ├── src/           # React 前端（见 src/AGENTS.md）
 │   ├── package.json
+│   ├── vitest.config.ts
 │   └── vite.config.ts
 └── openspec/          # 规格文档（非代码）
 ```
@@ -56,10 +58,8 @@ PhotoExifAnalyzer/
 
 ## ANTI-PATTERNS
 
-- **手动类型同步**：Rust 结构体 → TypeScript 接口需手动保持一致（`store.ts:6-70`）
+- **手动类型同步**：Rust 结构体 → TypeScript 接口需手动保持一致（`store.ts:6-99`，`ExportData` / `ExportImage` 镜像）
 - **CSP 已禁用**：`tauri.conf.json` 中 `csp: null`（生产环境需启用）
-- **3 个未使用命令**：`delete_images`、`get_thumbnail`、`export_statistics` 已注册但前端未调用（`scan_images` 在 store 中有 action 但无组件调用）
-- **前端无测试**：0 个测试文件，无测试框架配置
 
 ## COMMANDS
 
@@ -72,6 +72,12 @@ cd frontend && npm run build
 
 # Rust 测试
 cd frontend/src-tauri && cargo test
+
+# Rust 性能基准（默认忽略）
+cd frontend/src-tauri && cargo test -- --ignored
+
+# 前端测试
+cd frontend && npm run test
 
 # 前端 lint
 cd frontend && npm run lint
@@ -86,5 +92,5 @@ cd frontend && npm run format
 - 全局状态用 `lazy_static!`（Rust）和 Zustand（TS）
 - 缓存 DB 位于 `%APPDATA%/photo-exif-analyzer/exif_cache.db`
 - 进度通过 `window.emit("scan_progress")` 事件发送
-- 相机名称格式化（`make + model`）在 7 处重复，考虑提取
-- 文件名提取（`path.split(/[/\\]/).pop()`）在 5 处重复，考虑提取
+- 相机名称格式化：后端已收敛到 `ExifData::camera_name()`（`exif/mod.rs`），前端用 `lib/utils.ts` 的 `formatCamera()`
+- 文件名提取（`path.split(/[/\\]/).pop()`）在前端 7 处重复，考虑提取
