@@ -311,3 +311,266 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+#[cfg(test)]
+mod tests {
+    // NOTE: do NOT `use super::*` — it would bring the local `exif` module
+    // into scope and shadow / conflict with the `exif` (kamadak-exif) crate
+    // pulled in via `--extern`, producing E0659 "ambiguous name". Importing
+    // only the specific items we need avoids the glob collision.
+    use super::export_statistics;
+    use crate::exif::scanner::ScanResult;
+    use crate::exif::ExifData;
+    use std::path::PathBuf;
+
+    /// Build a ScanResult with the given path and EXIF fields.
+    /// `file_size` is derived from the path string length so different
+    /// images produce distinguishable sizes without extra parameters.
+    #[allow(clippy::too_many_arguments)]
+    fn make_result(
+        path: &str,
+        make: Option<&str>,
+        model: Option<&str>,
+        lens: Option<&str>,
+        focal: Option<f64>,
+        aperture: Option<f64>,
+        iso: Option<u32>,
+        exposure: Option<f64>,
+        datetime: Option<&str>,
+    ) -> ScanResult {
+        ScanResult {
+            path: PathBuf::from(path),
+            exif: ExifData {
+                make: make.map(String::from),
+                model: model.map(String::from),
+                lens_model: lens.map(String::from),
+                focal_length: focal,
+                aperture,
+                iso,
+                exposure_time: exposure,
+                datetime_original: datetime.map(String::from),
+                ..Default::default()
+            },
+            file_size: path.len() as u64,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn test_export_statistics_empty() {
+        let results: Vec<ScanResult> = Vec::new();
+        let data = export_statistics(results).expect("export should succeed on empty input");
+
+        assert_eq!(data.total_images, 0);
+        assert!(data.images.is_empty());
+        assert_eq!(data.statistics.cameras.total, 0);
+        assert_eq!(data.statistics.lenses.total, 0);
+        assert_eq!(data.statistics.focal_length.total, 0);
+        // timestamp should parse as a valid RFC3339 timestamp
+        assert!(chrono::DateTime::parse_from_rfc3339(&data.timestamp).is_ok());
+    }
+
+    #[test]
+    fn test_export_statistics_maps_full_exif() {
+        let results = vec![make_result(
+            "/photos/IMG_001.jpg",
+            Some("Canon"),
+            Some("EOS R5"),
+            Some("RF 50mm F1.2"),
+            Some(50.0),
+            Some(1.2),
+            Some(100),
+            Some(0.002),
+            Some("2024-01-15T10:30:00"),
+        )];
+
+        let data = export_statistics(results).expect("export should succeed");
+
+        assert_eq!(data.total_images, 1);
+        assert_eq!(data.images.len(), 1);
+
+        let img = &data.images[0];
+        assert_eq!(img.path, "/photos/IMG_001.jpg");
+        assert_eq!(img.filename, "IMG_001.jpg");
+        assert_eq!(img.camera.as_deref(), Some("Canon EOS R5"));
+        assert_eq!(img.lens.as_deref(), Some("RF 50mm F1.2"));
+        assert_eq!(img.focal_length, Some(50.0));
+        assert_eq!(img.aperture, Some(1.2));
+        assert_eq!(img.iso, Some(100));
+        assert_eq!(img.shutter_speed, Some(0.002));
+        assert_eq!(img.datetime.as_deref(), Some("2024-01-15T10:30:00"));
+
+        // Aggregated stats
+        assert_eq!(data.statistics.cameras.total, 1);
+        assert_eq!(data.statistics.cameras.cameras[0].name, "Canon EOS R5");
+        assert_eq!(data.statistics.lenses.total, 1);
+        assert_eq!(data.statistics.focal_length.total, 1);
+    }
+
+    #[test]
+    fn test_export_statistics_camera_with_only_make() {
+        // make present, model missing → camera should be the make alone
+        let results = vec![make_result(
+            "/photos/sigma.jpg",
+            Some("Sigma"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )];
+
+        let data = export_statistics(results).expect("export should succeed");
+        assert_eq!(data.images[0].camera.as_deref(), Some("Sigma"));
+        assert_eq!(data.statistics.cameras.total, 1);
+    }
+
+    #[test]
+    fn test_export_statistics_camera_with_only_model() {
+        // model present, make missing → the `camera` field on ExportImage is
+        // the model alone (see match in export_statistics). NOTE:
+        // `calculate_camera_stats` only counts results whose `make` is
+        // present, so `cameras.total` stays 0 for this case — this is the
+        // pre-existing aggregation behavior and is intentionally preserved
+        // here rather than "fixed" in this refactor.
+        let results = vec![make_result(
+            "/photos/iphone.jpg",
+            None,
+            Some("iPhone 15 Pro"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )];
+
+        let data = export_statistics(results).expect("export should succeed");
+        assert_eq!(data.images[0].camera.as_deref(), Some("iPhone 15 Pro"));
+        assert_eq!(data.statistics.cameras.total, 0);
+        assert!(data.statistics.cameras.cameras.is_empty());
+    }
+
+    #[test]
+    fn test_export_statistics_camera_no_make_no_model() {
+        // Both make and model missing → camera should be None
+        let results = vec![make_result(
+            "/photos/no_exif.jpg",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )];
+
+        let data = export_statistics(results).expect("export should succeed");
+        assert!(data.images[0].camera.is_none());
+        assert_eq!(data.statistics.cameras.total, 0);
+        assert!(data.statistics.cameras.cameras.is_empty());
+    }
+
+    #[test]
+    fn test_export_statistics_filename_extraction() {
+        // Verify filename is extracted from a Windows-style path with a
+        // backslash separator (regression guard for cross-platform paths).
+        let results = vec![make_result(
+            "C:\\Users\\Alice\\Pictures\\vacation.CR2",
+            Some("Canon"),
+            Some("EOS R6"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )];
+
+        let data = export_statistics(results).expect("export should succeed");
+        assert_eq!(data.images[0].filename, "vacation.CR2");
+    }
+
+    #[test]
+    fn test_export_statistics_filename_unknown_for_no_filename() {
+        // A root path (just `/`) has no file_name component on any platform
+        // → the export falls back to "unknown" rather than panicking.
+        // NOTE: a trailing separator like `/photos/` is NOT sufficient —
+        // Rust's Path strips trailing separators and returns the last
+        // normal component ("photos"), so we use the bare root here.
+        let results = vec![make_result(
+            "/",
+            Some("Canon"),
+            Some("EOS R5"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )];
+
+        let data = export_statistics(results).expect("export should succeed");
+        assert_eq!(data.images[0].filename, "unknown");
+    }
+
+    #[test]
+    fn test_export_statistics_aggregates_multiple_images() {
+        let results = vec![
+            make_result(
+                "/photos/a.jpg",
+                Some("Canon"),
+                Some("EOS R5"),
+                Some("RF 50mm"),
+                Some(50.0),
+                None,
+                None,
+                None,
+                None,
+            ),
+            make_result(
+                "/photos/b.jpg",
+                Some("Canon"),
+                Some("EOS R5"),
+                Some("RF 50mm"),
+                Some(50.0),
+                None,
+                None,
+                None,
+                None,
+            ),
+            make_result(
+                "/photos/c.jpg",
+                Some("Nikon"),
+                Some("Z6"),
+                Some("NIKKOR Z 24-70"),
+                Some(24.0),
+                None,
+                None,
+                None,
+                None,
+            ),
+        ];
+
+        let data = export_statistics(results).expect("export should succeed");
+
+        assert_eq!(data.total_images, 3);
+        assert_eq!(data.images.len(), 3);
+
+        // Camera stats: 2 Canon EOS R5 + 1 Nikon Z6
+        assert_eq!(data.statistics.cameras.total, 3);
+        assert_eq!(data.statistics.cameras.cameras.len(), 2);
+        assert_eq!(data.statistics.cameras.cameras[0].name, "Canon EOS R5");
+        assert_eq!(data.statistics.cameras.cameras[0].count, 2);
+
+        // Lens stats
+        assert_eq!(data.statistics.lenses.total, 3);
+        assert_eq!(data.statistics.lenses.lenses.len(), 2);
+
+        // Focal length stats: 2 at 50mm + 1 at 24mm
+        assert_eq!(data.statistics.focal_length.total, 3);
+    }
+}

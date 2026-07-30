@@ -69,6 +69,34 @@ export interface FilterCriteria {
   and_mode: boolean
 }
 
+// Export payload returned by the backend `export_statistics` command.
+// Mirrors `ExportData` / `ExportImage` in `src-tauri/src/lib.rs`.
+export interface ExportImage {
+  path: string
+  filename: string
+  size: number
+  camera: string | null
+  lens: string | null
+  focal_length: number | null
+  aperture: number | null
+  shutter_speed: number | null
+  iso: number | null
+  datetime: string | null
+}
+
+export interface ExportStatistics {
+  cameras: CameraStats
+  lenses: LensStats
+  focal_length: FocalLengthStats
+}
+
+export interface ExportData {
+  timestamp: string
+  total_images: number
+  statistics: ExportStatistics
+  images: ExportImage[]
+}
+
 // App state
 interface AppState {
   // Directory
@@ -129,7 +157,7 @@ interface AppState {
   toggleSortOrder: () => void
   setTheme: (theme: 'light' | 'dark' | 'system') => void
   setDetailMode: (mode: 'simple' | 'detailed') => void
-  exportToJSON: () => void
+  exportToJSON: () => Promise<void>
   filterByCamera: (camera: string) => void
   filterByLens: (lens: string) => void
   resetFilter: () => void
@@ -367,29 +395,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ sortOrder: newOrder, filteredResults: sorted })
   },
 
-  exportToJSON: () => {
-    const { filteredResults, cameraStats, lensStats, focalLengthStats } = get()
-    const exportData = {
-      timestamp: new Date().toISOString(),
-      totalImages: filteredResults.length,
-      statistics: {
-        cameras: cameraStats,
-        lenses: lensStats,
-        focalLength: focalLengthStats,
-      },
-      images: filteredResults.map((r) => ({
-        path: r.path,
-        filename: r.path.split(/[/\\]/).pop(),
-        size: r.file_size,
-        camera: r.exif.make && r.exif.model ? `${r.exif.make} ${r.exif.model}` : null,
-        lens: r.exif.lens_model || null,
-        focalLength: r.exif.focal_length || null,
-        aperture: r.exif.aperture || null,
-        shutterSpeed: r.exif.exposure_time || null,
-        iso: r.exif.iso || null,
-        datetime: r.exif.datetime_original || null,
-      })),
-    }
+  exportToJSON: async () => {
+    const { filteredResults } = get()
+    // Delegate field mapping + statistics aggregation to the backend
+    // `export_statistics` command so the logic lives in one place
+    // (mirrors `ExportData` in `src-tauri/src/lib.rs`).
+    const exportData = await invoke<ExportData>('export_statistics', {
+      results: filteredResults,
+    })
 
     const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
