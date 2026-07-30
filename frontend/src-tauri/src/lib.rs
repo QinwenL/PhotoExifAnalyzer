@@ -10,8 +10,8 @@ use exif::stats::{
     filter_results, CameraStats, FilterCriteria, FocalLengthStats, LensStats,
 };
 use serde::Serialize;
-use exif::file_ops::{delete_file, delete_files, delete_files_with_progress_callback};
-use exif::thumbnail::{get_thumbnail_path, get_image_base64};
+use exif::file_ops::{delete_file, delete_files};
+use exif::thumbnail::{delete_thumbnail, get_thumbnail_path, get_image_base64};
 
 lazy_static::lazy_static! {
     static ref SCAN_CANCELLED: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
@@ -56,18 +56,25 @@ fn scan_images(dir: String, recursive: bool) -> Vec<ScanResult> {
 }
 
 #[tauri::command]
-fn scan_images_with_progress(dir: String, recursive: bool) -> Vec<ScanResult> {
+fn scan_images_with_progress(window: tauri::Window, dir: String, recursive: bool) -> Vec<ScanResult> {
     *SCAN_CANCELLED.lock().unwrap() = false;
     let cancelled = Arc::clone(&SCAN_CANCELLED);
 
     // Use the global EXIF cache — dramatically reduces disk I/O on repeat scans
     let cache = EXIF_CACHE.as_ref().cloned();
 
+    // Remove dead entries before scanning
+    if let Some(cache) = EXIF_CACHE.as_ref() {
+        let _ = cache.lock().unwrap().cleanup();
+    }
+
     scan_directory_with_cache(
         &dir,
         recursive,
         cache,
-        |_| {},
+        move |pct| {
+            let _ = window.emit("scan_progress", pct);
+        },
         move || *cancelled.lock().unwrap(),
     )
 }
@@ -97,21 +104,75 @@ fn filter_images(results: Vec<ScanResult>, criteria: FilterCriteria) -> Vec<Scan
     filter_results(&results, &criteria)
 }
 
+/// Asynchronously clean up cached data for deleted files.
+/// Runs in a background thread to avoid blocking the delete operation.
+fn cleanup_caches_async(paths: Vec<String>) {
+    std::thread::spawn(move || {
+        for path_str in paths.iter() {
+            let path = Path::new(path_str);
+
+            // Clean up thumbnail cache
+            let _ = delete_thumbnail(path);
+
+            // Clean up EXIF cache
+            if let Some(cache) = EXIF_CACHE.as_ref() {
+                let _ = cache.lock().unwrap().remove(path);
+            }
+        }
+    });
+}
+
 #[tauri::command]
 fn delete_image(path: String) -> Result<(), String> {
-    delete_file(&path)
+    let result = delete_file(&path);
+    if result.is_ok() {
+        cleanup_caches_async(vec![path]);
+    }
+    result
 }
 
 #[tauri::command]
 fn delete_images(paths: Vec<String>) -> Vec<Result<(), String>> {
-    delete_files(&paths)
+    let results = delete_files(&paths);
+    let to_cleanup: Vec<String> = paths
+        .iter()
+        .zip(results.iter())
+        .filter(|(_, r)| r.is_ok())
+        .map(|(p, _)| p.clone())
+        .collect();
+    if !to_cleanup.is_empty() {
+        cleanup_caches_async(to_cleanup);
+    }
+    results
 }
 
 #[tauri::command]
 fn delete_images_with_progress(window: tauri::Window, paths: Vec<String>) -> Vec<Result<(), String>> {
-    delete_files_with_progress_callback(&paths, move |progress| {
+    let total = paths.len() as f64;
+    let mut results = Vec::with_capacity(paths.len());
+    let mut to_cleanup: Vec<String> = Vec::new();
+
+    for (i, path_str) in paths.iter().enumerate() {
+        let path = Path::new(path_str);
+
+        let file_result = delete_file(path);
+
+        if file_result.is_ok() {
+            to_cleanup.push(path_str.clone());
+        }
+
+        results.push(file_result);
+
+        let progress = ((i + 1) as f64 / total) * 100.0;
         let _ = window.emit("delete_progress", progress);
-    })
+    }
+
+    // Offload cache cleanup to background thread so UI returns immediately
+    if !to_cleanup.is_empty() {
+        cleanup_caches_async(to_cleanup);
+    }
+
+    results
 }
 
 #[tauri::command]
