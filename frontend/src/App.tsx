@@ -9,6 +9,7 @@ import { ImageDetail } from './components/ImageDetail'
 import { VirtualizedGrid, VirtualizedList } from './components/VirtualizedGrid'
 import { StatusBar } from './components/StatusBar'
 import { ConfirmDialog } from './components/ConfirmDialog'
+import { Thumbnail } from './components/Thumbnail'
 
 // Responsive grid columns based on container width
 function useGridColumns() {
@@ -304,10 +305,11 @@ function App() {
                     onClick={(e) => useAppStore.getState().toggleImageSelection(result.path, index, e.shiftKey, e.ctrlKey || e.metaKey)}
                     onDoubleClick={() => setSelectedDetailImage(result)}
                   >
-                    <div className="absolute inset-0 bg-muted flex items-center justify-center">
-                      <span className="text-xs text-muted-foreground truncate px-2">
+                    <Thumbnail path={result.path} className="absolute inset-0" />
+                    <div className="absolute bottom-0 left-0 right-0 bg-black/60 px-1 py-0.5">
+                      <p className="text-[10px] text-white truncate">
                         {result.path.split(/[/\\]/).pop()}
-                      </span>
+                      </p>
                     </div>
                     {selectedImages.has(result.path) && (
                       <div className="absolute top-2 right-2 w-5 h-5 bg-primary rounded-full flex items-center justify-center">
