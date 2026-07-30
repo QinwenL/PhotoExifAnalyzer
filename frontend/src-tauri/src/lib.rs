@@ -8,6 +8,7 @@ use exif::stats::{
     calculate_camera_stats, calculate_focal_length_stats, calculate_lens_stats,
     filter_results, CameraStats, FilterCriteria, FocalLengthStats, LensStats,
 };
+use serde::Serialize;
 use exif::file_ops::{delete_file, delete_files};
 use exif::thumbnail::{get_thumbnail_path, get_image_base64};
 
@@ -88,6 +89,82 @@ fn get_image_data(path: String, max_size: Option<u32>) -> Result<String, String>
     get_image_base64(path, size)
 }
 
+#[derive(Debug, Serialize)]
+pub struct ExportData {
+    pub timestamp: String,
+    pub total_images: usize,
+    pub statistics: ExportStatistics,
+    pub images: Vec<ExportImage>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExportStatistics {
+    pub cameras: CameraStats,
+    pub lenses: LensStats,
+    pub focal_length: FocalLengthStats,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExportImage {
+    pub path: String,
+    pub filename: String,
+    pub size: u64,
+    pub camera: Option<String>,
+    pub lens: Option<String>,
+    pub focal_length: Option<f64>,
+    pub aperture: Option<f64>,
+    pub shutter_speed: Option<f64>,
+    pub iso: Option<u32>,
+    pub datetime: Option<String>,
+}
+
+#[tauri::command]
+fn export_statistics(results: Vec<ScanResult>) -> Result<ExportData, String> {
+    let camera_stats = calculate_camera_stats(&results);
+    let lens_stats = calculate_lens_stats(&results);
+    let focal_length_stats = calculate_focal_length_stats(&results);
+
+    let images: Vec<ExportImage> = results
+        .into_iter()
+        .map(|r| {
+            let filename = r.path.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            
+            let camera = match (&r.exif.make, &r.exif.model) {
+                (Some(make), Some(model)) => Some(format!("{} {}", make, model)),
+                (Some(make), None) => Some(make.clone()),
+                (None, Some(model)) => Some(model.clone()),
+                _ => None,
+            };
+
+            ExportImage {
+                path: r.path.to_string_lossy().to_string(),
+                filename,
+                size: r.file_size,
+                camera,
+                lens: r.exif.lens_model,
+                focal_length: r.exif.focal_length,
+                aperture: r.exif.aperture,
+                shutter_speed: r.exif.exposure_time,
+                iso: r.exif.iso,
+                datetime: r.exif.datetime_original,
+            }
+        })
+        .collect();
+
+    Ok(ExportData {
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        total_images: images.len(),
+        statistics: ExportStatistics {
+            cameras: camera_stats,
+            lenses: lens_stats,
+            focal_length: focal_length_stats,
+        },
+        images,
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -104,6 +181,7 @@ pub fn run() {
             delete_images_with_progress,
             get_thumbnail,
             get_image_data,
+            export_statistics,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
