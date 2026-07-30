@@ -180,3 +180,30 @@ fn test_cache_operations() {
     let cached = cache.get(path);
     assert!(cached.is_none());
 }
+
+#[test]
+fn test_cache_cleanup_removes_dead_entries() {
+    let temp_dir = TempDir::new().unwrap();
+    create_test_image(temp_dir.path(), "photo.jpg");
+
+    let cache = exif::cache::ExifCache::new(temp_dir.path()).unwrap();
+    let path = temp_dir.path().join("photo.jpg");
+
+    // Pre-populate cache
+    let exif_data = exif::ExifData::default();
+    cache.set(&path, &exif_data).unwrap();
+    assert!(cache.get(&path).is_some());
+
+    // Delete the file from disk
+    fs::remove_file(&path).unwrap();
+    assert!(!path.exists());
+
+    // cleanup() should remove the dead entry
+    let removed = cache.cleanup().unwrap();
+    assert_eq!(removed, 1);
+
+    // Cache should now be empty
+    assert!(cache.get(&path).is_none());
+    let stats = cache.stats();
+    assert_eq!(stats.total_entries, 0);
+}
