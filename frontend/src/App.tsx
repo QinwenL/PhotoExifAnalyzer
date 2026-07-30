@@ -57,6 +57,7 @@ function App() {
     setViewMode,
     selectAllImages,
     clearSelection,
+    selectSingleImage,
     setSelectedDetailImage,
     setSortBy,
     toggleSortOrder,
@@ -133,6 +134,18 @@ function App() {
   const cancelDelete = () => {
     setShowDeleteConfirm(false)
     setPendingDeleteImages([])
+  }
+
+  /**
+   * 单图删除入口（来自 ImageDetail 的"删除"按钮）。
+   * 走与批量删除完全相同的 ConfirmDialog + deleteSelectedImages 路径，
+   * 保证 scanResults / 统计 / lastSelectedIndex 同步更新。
+   */
+  const handleDeleteFromDetail = (result: ScanResult) => {
+    setSelectedDetailImage(null)
+    selectSingleImage(result.path)
+    setPendingDeleteImages([result])
+    setShowDeleteConfirm(true)
   }
 
   return (
@@ -480,6 +493,7 @@ function App() {
         <ImageDetail
           result={selectedDetailImage}
           onClose={() => setSelectedDetailImage(null)}
+          onDelete={handleDeleteFromDetail}
         />
       )}
 

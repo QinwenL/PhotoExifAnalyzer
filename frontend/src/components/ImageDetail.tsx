@@ -7,9 +7,11 @@ import { formatCamera } from '@/lib/utils'
 interface ImageDetailProps {
   result: ScanResult
   onClose: () => void
+  /** 请求删除此图片（由父组件统一处理确认流程与 store 状态） */
+  onDelete?: (result: ScanResult) => void
 }
 
-export function ImageDetail({ result, onClose }: ImageDetailProps) {
+export function ImageDetail({ result, onClose, onDelete }: ImageDetailProps) {
   const [imageUrl, setImageUrl] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const { toggleImageSelection, selectedImages } = useAppStore()
@@ -33,10 +35,13 @@ export function ImageDetail({ result, onClose }: ImageDetailProps) {
     loadImage()
   }, [result.path])
 
-  const handleDelete = async () => {
-    const confirmed = window.confirm('确定要将此图片移到回收站吗？')
-    if (confirmed) {
-      await invoke('delete_image', { path: result.path })
+  const handleDelete = () => {
+    // 优先走父组件的统一删除流程（会弹出 ConfirmDialog 并通过 store
+    // 更新 scanResults / 统计 / lastSelectedIndex）。若未提供 onDelete
+    // 则降级为关闭面板（避免静默失败）。
+    if (onDelete) {
+      onDelete(result)
+    } else {
       onClose()
     }
   }

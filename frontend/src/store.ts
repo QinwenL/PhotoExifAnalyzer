@@ -160,6 +160,8 @@ interface AppState {
   toggleImageSelection: (path: string, index: number, shiftKey: boolean, ctrlKey: boolean) => void
   selectAllImages: () => void
   clearSelection: () => void
+  /** 清空当前选择并仅选中给定路径（用于单图删除等场景） */
+  selectSingleImage: (path: string) => void
   setViewMode: (mode: 'grid' | 'list') => void
   setSelectedDetailImage: (result: ScanResult | null) => void
   setSortBy: (field: 'name' | 'date' | 'size' | 'camera') => void
@@ -372,7 +374,13 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ selectedImages: allPaths })
   },
 
-  clearSelection: () => set({ selectedImages: new Set() }),
+  clearSelection: () => set({ selectedImages: new Set(), lastSelectedIndex: null }),
+
+  selectSingleImage: (path) => set({
+    selectedImages: new Set([path]),
+    // 重置 lastSelectedIndex：单图选择不建立范围选择的起点
+    lastSelectedIndex: null,
+  }),
 
   setViewMode: (mode) => set({ viewMode: mode }),
 
