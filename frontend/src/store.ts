@@ -178,6 +178,19 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   scanDirectory: async (dir, recursive) => {
     set({ isScanning: true, scanProgress: 0 })
+    // Bump thumbnailEpoch to rotate to a new counter bucket before the
+    // batch of `beginThumbnailLoad` calls that the re-mounted Thumbnail
+    // components will fire. This is REQUIRED for correctness in the
+    // "cancel + immediately re-scan same dir" scenario:
+    //   - `Thumbnail` subscribes to `thumbnailEpoch` via a Zustand
+    //     selector, so epoch change ⇒ re-render ⇒ effect re-run for
+    //     EVERY tile that still has src===null (otherwise those tiles
+    //     stay as `animate-pulse` skeletons forever because React
+    //     reuses the same key={path} component instance).
+    //   - begin/complete callbacks gate their counter mutations on
+    //     `epoch === state.thumbnailEpoch`, so in-flight completes from
+    //     the previous scan are silently dropped instead of corrupting
+    //     the new batch's counters.
     get().resetThumbnailProgress()
     try {
       const results: ScanResult[] = await invoke('scan_images', { dir, recursive })
@@ -196,6 +209,10 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   scanDirectoryWithProgress: async (dir, recursive) => {
     set({ isScanning: true, scanProgress: 0 })
+    // Same rationale as scanDirectory (see comment above): rotate the
+    // thumbnail epoch so stale-skeleton tiles re-fire their load effect
+    // and in-flight completes from the cancelled previous batch are
+    // gated out by the epoch check in completeThumbnailLoad.
     get().resetThumbnailProgress()
     try {
       const progressHandler = listen('scan_progress', (event) => {

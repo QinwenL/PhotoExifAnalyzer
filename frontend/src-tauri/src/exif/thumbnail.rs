@@ -1,7 +1,16 @@
 use std::path::{Path, PathBuf};
 
 const THUMBNAIL_SIZE: u32 = 150;
-const MAX_DISK_CACHE_BYTES: u64 = 8 * 1024 * 1024;
+/// Absolute ceiling for `max_size` accepted by any entrypoint in this
+/// module. Also enforced at the Tauri command layer (lib.rs) as a second
+/// defensive clamp. Use 4096 = ~16.7 Mpix which is plenty for any desktop
+/// thumbnail use case while keeping memory & CPU bounded.
+pub const MAX_ALLOWED_THUMBNAIL_SIZE: u32 = 4096;
+/// Conservative upper bound for on-disk size-cache files. A 4096x4096
+/// quality-85 JPEG of worst-case (random) pixel noise typically peaks at
+/// ~22 MiB. We leave ~1.9× headroom so future callers bumping the quality
+/// or the pixel ceiling slightly won't trip the "stale file" logic.
+const MAX_DISK_CACHE_BYTES: u64 = 42 * 1024 * 1024;
 
 const RAW_EXTENSIONS: &[&str] = &[
     "cr2", "cr3", "crw",
@@ -246,6 +255,10 @@ fn generate_thumbnail(input_path: &Path, output_path: &Path) -> Result<(), Strin
 /// `get_image_base64_cached` (write bytes to disk directly, skip the
 /// encode-decode round-trip).
 fn get_image_jpeg_bytes(path: &Path, max_size: u32) -> Result<Vec<u8>, String> {
+    // Defensive clamp at the function layer. The Tauri command layer also
+    // clamps; the redundancy protects against future non-command callers
+    // that might bypass the command layer (tests, other Rust modules).
+    let max_size = max_size.max(1).min(MAX_ALLOWED_THUMBNAIL_SIZE);
     let img = if max_size <= THUMBNAIL_SIZE {
         if let Ok(thumb_path) = get_thumbnail_path(path) {
             if let Ok(thumb) = image::open(&thumb_path) {
@@ -323,7 +336,19 @@ pub fn delete_all_size_caches(path: &Path) -> Result<(), String> {
     };
     let read_dir = match std::fs::read_dir(&thumb_dir) {
         Ok(rd) => rd,
-        Err(_) => return Ok(()),
+        Err(e) => {
+            eprintln!(
+                "[thumbnail::delete_all_size_caches] Failed to read {}: {} \
+                 (size-cache files may be left orphaned until clear_thumbnails)",
+                thumb_dir.display(),
+                e
+            );
+            return Err(format!(
+                "Failed to enumerate thumbnail dir {}: {}",
+                thumb_dir.display(),
+                e
+            ));
+        }
     };
     for entry in read_dir.flatten() {
         let entry_path = entry.path();
@@ -335,7 +360,14 @@ pub fn delete_all_size_caches(path: &Path) -> Result<(), String> {
             .and_then(|f| f.to_str())
             .unwrap_or("");
         if fname.starts_with(&prefix) {
-            let _ = std::fs::remove_file(&entry_path);
+            if let Err(e) = std::fs::remove_file(&entry_path) {
+                eprintln!(
+                    "[thumbnail::delete_all_size_caches] Failed to remove orphan \
+                     size cache {}: {}",
+                    entry_path.display(),
+                    e
+                );
+            }
         }
     }
     Ok(())
@@ -368,11 +400,28 @@ use std::num::NonZeroUsize;
 
 const MEMORY_CACHE_CAPACITY: usize = 64;
 
+/// Memory cache entry payload. Bundling the disk cache mtime alongside the cached
+/// data URI lets us close the TOCTOU race between the "is disk cache
+/// still valid?" probe and the eventual "drop stale memory entry" pop()":
+/// if a concurrent thread has refreshed the cache entry between our probe and
+/// our pop(), the bundled disk_mtime will differ from what we read during
+/// the probe and we'll skip the pop.
+#[derive(Clone)]
+struct MemCacheEntry {
+    data_uri: String,
+    /// The `std::fs::metadata().modified()` timestamp of the size-aware disk
+    /// cache file at the moment this memory entry was written. `None` means
+    /// "written without a disk cache backing" (shouldn't happen in practice,
+    /// since the cold path always writes both caches).
+    disk_mtime: Option<std::time::SystemTime>,
+}
+
 lazy_static::lazy_static! {
-    static ref IMAGE_DATA_CACHE: std::sync::Mutex<lru::LruCache<(std::path::PathBuf, u32), String>> =
-        std::sync::Mutex::new(lru::LruCache::new(
-            NonZeroUsize::new(MEMORY_CACHE_CAPACITY).unwrap()
-        ));
+    static ref IMAGE_DATA_CACHE: std::sync::Mutex<
+        lru::LruCache<(std::path::PathBuf, u32), MemCacheEntry>
+    > = std::sync::Mutex::new(lru::LruCache::new(
+        NonZeroUsize::new(MEMORY_CACHE_CAPACITY).unwrap()
+    ));
 }
 
 /// Access `IMAGE_DATA_CACHE` safely, converting `Mutex::lock` poison into a
@@ -380,7 +429,7 @@ lazy_static::lazy_static! {
 /// instead of panicking the whole pool thread.
 fn with_memory_cache<F, R>(f: F) -> Result<R, String>
 where
-    F: FnOnce(&mut lru::LruCache<(std::path::PathBuf, u32), String>) -> R,
+    F: FnOnce(&mut lru::LruCache<(std::path::PathBuf, u32), MemCacheEntry>) -> R,
 {
     let mut guard = IMAGE_DATA_CACHE
         .lock()
@@ -409,11 +458,28 @@ fn disk_cache_fresh(disk_path: &Path, source_path: &Path) -> bool {
     }
 }
 
+/// Helper for the repeated "remove stale disk cache entry" pattern. Always
+/// logs on failure so operators can diagnose stuck "re-decode every time"
+/// issues caused by Windows file-handle pinning / ACLs / readonly bits.
+fn remove_stale_disk_cache(disk_path: &Path) {
+    if let Err(e) = std::fs::remove_file(disk_path) {
+        eprintln!(
+            "[thumbnail::cache] Failed to remove stale/invalid size cache {}: {} \
+             (source file may repeatedly be re-decoded until file is removable)",
+            disk_path.display(),
+            e
+        );
+    }
+}
+
 pub fn get_image_base64_cached(
     path: &std::path::Path,
     max_size: u32,
 ) -> Result<String, String> {
     let key = (path.to_path_buf(), max_size);
+    // Single computation for the whole function — hash + mkdir are O(1) but
+    // repeated three times in the naive version.
+    let disk_path_opt = get_data_cache_path(path, max_size).ok();
 
     // Memory LRU cache probe. We only trust the hit when the matching
     // size-aware disk cache entry is also present and fresh:
@@ -423,51 +489,72 @@ pub fn get_image_base64_cached(
     // path since the last decode). Without this check scrolling back to
     // an earlier-viewed photo after editing it would serve the stale
     // in-memory bytes forever (until LRU eviction).
-    let memory_hit = with_memory_cache(|cache| cache.get(&key).cloned())?;
-    if let Some(cached) = memory_hit {
-        let disk_valid = if let Ok(dp) = get_data_cache_path(path, max_size) {
-            dp.exists() && disk_cache_fresh(&dp, path)
+    //
+    // TOCTOU: we capture the memory entry's bundled `disk_mtime` on GET.
+    // If we later decide to POP because disk cache looks stale, we verify
+    // the current entry still refers to the SAME disk_mtime — if not, a
+    // concurrent thread already refreshed the entry in the gap between
+    // the two mutex acquisitions and we must NOT drop the newly-written
+    // valid data.
+    let (mem_data, mem_disk_mtime) = match with_memory_cache(|cache| cache.get(&key).cloned())? {
+        Some(entry) => (Some(entry.data_uri), entry.disk_mtime),
+        None => (None, None),
+    };
+    if let Some(data) = mem_data {
+        let disk_valid = if let Some(ref dp) = disk_path_opt {
+            dp.exists() && disk_cache_fresh(dp, path)
         } else {
             false
         };
         if disk_valid {
-            return Ok(cached);
+            return Ok(data);
         }
-        // Memory entry is out of date — drop it so the cold path refills
-        // both caches with the new source content.
-        let _ = with_memory_cache(|cache| cache.pop(&key));
+        // Memory entry is out of date — drop it with version gating so we
+        // don't stomp on a concurrent refresh that already happened.
+        let _ = with_memory_cache(|cache| {
+            if let Some(current) = cache.get(&key) {
+                if current.disk_mtime == mem_disk_mtime {
+                    cache.pop(&key);
+                }
+            }
+        });
     }
 
     // Disk cache hit path (size-aware) — validate mtime and size cap
-    if let Ok(disk_path) = get_data_cache_path(path, max_size) {
+    if let Some(ref disk_path) = disk_path_opt {
         if disk_path.exists() {
-            let fresh = disk_cache_fresh(&disk_path, path);
+            let fresh = disk_cache_fresh(disk_path, path);
             let within_size = disk_path
                 .metadata()
                 .map(|m| m.len() <= MAX_DISK_CACHE_BYTES)
                 .unwrap_or(false);
             match (fresh, within_size) {
-                (true, true) => match std::fs::read(&disk_path) {
+                (true, true) => match std::fs::read(disk_path) {
                     Ok(bytes) if bytes.starts_with(&[0xFF, 0xD8]) => {
                         use base64::Engine;
                         let data = format!(
                             "data:image/jpeg;base64,{}",
                             base64::engine::general_purpose::STANDARD.encode(&bytes)
                         );
-                        let _ = with_memory_cache(|cache| cache.put(key.clone(), data.clone()));
+                        let disk_mtime_now = disk_path.metadata().and_then(|m| m.modified()).ok();
+                        let _ = with_memory_cache(|cache| {
+                            cache.put(
+                                key.clone(),
+                                MemCacheEntry {
+                                    data_uri: data.clone(),
+                                    disk_mtime: disk_mtime_now,
+                                },
+                            )
+                        });
                         return Ok(data);
                     }
-                    Ok(_) => {
-                        let _ = std::fs::remove_file(&disk_path);
-                    }
-                    Err(_) => {
-                        let _ = std::fs::remove_file(&disk_path);
-                    }
+                    Ok(_) => remove_stale_disk_cache(disk_path),
+                    Err(_) => remove_stale_disk_cache(disk_path),
                 },
                 _ => {
                     // Stale mtime OR oversized; remove the stale entry and
                     // fall through to full decode.
-                    let _ = std::fs::remove_file(&disk_path);
+                    remove_stale_disk_cache(disk_path);
                 }
             }
         }
@@ -476,24 +563,33 @@ pub fn get_image_base64_cached(
     // Cold path: full decode -> JPEG bytes. Avoid base64 round-trip by
     // writing raw bytes straight to disk.
     let jpeg_bytes = get_image_jpeg_bytes(path, max_size)?;
-    {
-        use base64::Engine;
-        if let Ok(disk_path) = get_data_cache_path(path, max_size) {
-            if let Err(e) = std::fs::write(&disk_path, &jpeg_bytes) {
-                eprintln!(
-                    "Failed to write thumbnail cache {}: {}",
-                    disk_path.display(),
-                    e
-                );
-            }
+    use base64::Engine;
+    let mut disk_mtime_after_write: Option<std::time::SystemTime> = None;
+    if let Some(ref disk_path) = disk_path_opt {
+        if let Err(e) = std::fs::write(disk_path, &jpeg_bytes) {
+            eprintln!(
+                "[thumbnail::cache] Failed to write thumbnail cache {}: {}",
+                disk_path.display(),
+                e
+            );
+        } else {
+            disk_mtime_after_write = disk_path.metadata().and_then(|m| m.modified()).ok();
         }
-        let data = format!(
-            "data:image/jpeg;base64,{}",
-            base64::engine::general_purpose::STANDARD.encode(&jpeg_bytes)
-        );
-        let _ = with_memory_cache(|cache| cache.put(key, data.clone()));
-        return Ok(data);
     }
+    let data = format!(
+        "data:image/jpeg;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(&jpeg_bytes)
+    );
+    let _ = with_memory_cache(|cache| {
+        cache.put(
+            key,
+            MemCacheEntry {
+                data_uri: data.clone(),
+                disk_mtime: disk_mtime_after_write,
+            },
+        )
+    });
+    Ok(data)
 }
 
 #[cfg(test)]

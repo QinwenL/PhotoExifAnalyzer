@@ -15,15 +15,27 @@ interface ThumbnailProps {
 export function Thumbnail({ path, maxSize = 200, className = '' }: ThumbnailProps) {
   const [src, setSrc] = useState<string | null>(null)
   const [error, setError] = useState(false)
+  // Subscribe to `thumbnailEpoch` so this component re-renders (and thus
+  // re-runs the load effect below) whenever the app rotates into a new
+  // scan batch. We *cannot* rely on a scanResults swap alone to remount:
+  // if the user cancels a scan and immediately re-scans the SAME directory,
+  // `key={result.path}` in VirtualizedGrid will be identical and React will
+  // reuse the component instance. Without an explicit epoch dependency,
+  // still-loading thumbnails (src === null) would remain stuck in the
+  // loading skeleton forever because effect deps `[path, maxSize]` haven't
+  // changed — counters got zeroed by resetThumbnailProgress but no one
+  // re-issued the `invoke`. Subscribing here is the minimal fix that
+  // matches the counter-reset contract in `store.ts`.
+  const thumbnailEpoch = useAppStore((s) => s.thumbnailEpoch)
 
   useEffect(() => {
     let cancelled = false
     let settled = false
-    // Per-effect accounting: ensure begin/complete are called exactly once
-    // each even under React 19 StrictMode double-mount. Cleanup always
-    // completes on our behalf if we haven't already settled via then/catch.
-    // (The `settled` guard prevents double-completion in the same run.)
-    let accountedComplete = false
+    // `settled` is the single source of truth for whether the load has
+    // finished (then/catch branch) and thus been accounted for in the
+    // counters. Cleanup only needs to balance begin with a synthetic
+    // complete if we were cancelled mid-flight *before* either branch
+    // ran. See R-6 rationale: redundant `accountedComplete` was removed.
     const snapshot = useAppStore.getState()
     const epoch = snapshot.thumbnailEpoch
     const begin = snapshot.beginThumbnailLoad
@@ -35,14 +47,12 @@ export function Thumbnail({ path, maxSize = 200, className = '' }: ThumbnailProp
       .then((data) => {
         if (cancelled || settled) return
         settled = true
-        accountedComplete = true
         setSrc(data)
         complete(path, true, epoch)
       })
       .catch(() => {
         if (cancelled || settled) return
         settled = true
-        accountedComplete = true
         setError(true)
         complete(path, false, epoch)
       })
@@ -50,22 +60,18 @@ export function Thumbnail({ path, maxSize = 200, className = '' }: ThumbnailProp
     return () => {
       cancelled = true
       if (!settled) {
-        settled = true
-        if (!accountedComplete) {
-          accountedComplete = true
-          complete(path, false, epoch)
-        }
+        complete(path, false, epoch)
       }
     }
-    // Intentionally only `[path, maxSize]`:
+    // Dependencies are intentionally `[path, maxSize, thumbnailEpoch]`.
     //  - begin/complete are read from `getState()` (Zustand store action
-    //    refs are stable across the app's lifetime, so including them would
-    //    be noise and — worse — would cause cascade re-runs if middleware
-    //    ever swapped them out).
-    //  - `epoch` is snapshot-captured at effect start; on a genuine epoch
-    //    change the Thumbnail parent will unmount/remount anyway via the
-    //    `scanResults` swap, so we don't need it in the deps array.
-  }, [path, maxSize])
+    //    refs are stable across the app's lifetime, so including them
+    //    would be noise and — worse — would cause cascade re-runs if
+    //    middleware ever swapped them out).
+    //  - `epoch` is snapshot-captured at effect start; deps include
+    //    `thumbnailEpoch` as a selector subscription so a new scan batch
+    //    re-runs the effect for any still-skeleton tile.
+  }, [path, maxSize, thumbnailEpoch])
 
   if (error) {
     return (

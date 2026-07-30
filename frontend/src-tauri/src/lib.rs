@@ -200,10 +200,13 @@ fn get_thumbnail(path: String) -> Result<String, String> {
 #[tauri::command]
 async fn get_image_data(path: String, max_size: Option<u32>) -> Result<String, String> {
     let path = std::path::PathBuf::from(path);
+    // Command-layer clamp. Also clamped again inside `get_image_jpeg_bytes`
+    // as defense-in-depth for non-command callers; the redundancy is
+    // intentional (public surface defense + module defense).
     let size = max_size
         .filter(|&s| s > 0)
         .unwrap_or(800)
-        .min(4096);
+        .min(exif::thumbnail::MAX_ALLOWED_THUMBNAIL_SIZE);
     tauri::async_runtime::spawn_blocking(move || {
         exif::thumbnail::get_image_base64_cached(&path, size)
     })
