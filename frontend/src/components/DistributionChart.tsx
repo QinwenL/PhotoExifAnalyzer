@@ -20,11 +20,11 @@ interface DistributionChartProps {
 }
 
 const COLORS = [
-  'hsl(var(--primary))',
-  'hsl(var(--secondary))',
-  'hsl(var(--accent))',
-  'hsl(var(--muted))',
-  'hsl(var(--destructive))',
+  'hsl(var(--color-primary))',
+  'hsl(var(--color-secondary))',
+  'hsl(var(--color-accent))',
+  'hsl(var(--color-muted))',
+  'hsl(var(--color-destructive))',
   '#8884d8',
   '#82ca9d',
   '#ffc658',

@@ -45,7 +45,7 @@ export function FocalLengthChart({ stats }: FocalLengthChartProps) {
             formatter={(value) => [value, '数量']}
             labelFormatter={(label) => `焦距范围: ${label}`}
           />
-          <Bar dataKey="count" fill="hsl(var(--primary))" radius={[4, 4, 0, 0]} />
+          <Bar dataKey="count" fill="hsl(var(--color-primary))" radius={[4, 4, 0, 0]} />
         </BarChart>
       </ResponsiveContainer>
     </div>
