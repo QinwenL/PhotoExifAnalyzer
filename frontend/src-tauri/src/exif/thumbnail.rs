@@ -288,8 +288,11 @@ fn get_image_jpeg_bytes(path: &Path, max_size: u32) -> Result<Vec<u8>, String> {
 }
 
 fn encode_jpeg_bytes(img: &image::DynamicImage) -> Result<Vec<u8>, String> {
+    use image::codecs::jpeg::JpegEncoder;
     let mut buffer = std::io::Cursor::new(Vec::new());
-    img.write_to(&mut buffer, image::ImageOutputFormat::Jpeg(85))
+    // image 0.25 removed ImageOutputFormat; use JpegEncoder for quality control.
+    let encoder = JpegEncoder::new_with_quality(&mut buffer, 85);
+    img.write_with_encoder(encoder)
         .map_err(|e| format!("Failed to encode image: {}", e))?;
     Ok(buffer.into_inner())
 }
@@ -633,7 +636,9 @@ mod tests {
     fn create_valid_jpeg_bytes(width: u32, height: u32) -> Vec<u8> {
         let img = image::RgbImage::from_pixel(width, height, image::Rgb([128u8, 128, 128]));
         let mut buffer = std::io::Cursor::new(Vec::new());
-        img.write_to(&mut buffer, image::ImageOutputFormat::Jpeg(85))
+        // image 0.25: ImageFormat replaces ImageOutputFormat. Quality doesn't
+        // matter for test fixtures, so use the default Jpeg encoder.
+        img.write_to(&mut buffer, image::ImageFormat::Jpeg)
             .expect("Failed to encode test JPEG");
         buffer.into_inner()
     }

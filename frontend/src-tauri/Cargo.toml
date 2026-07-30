@@ -20,7 +20,7 @@ kamadak-exif = "0.5"
 walkdir = "2"
 rayon = "1"
 trash = "3"
-image = "0.24"
+image = "0.25"
 base64 = "0.21"
 rusqlite = { version = "0.31", features = ["bundled"] }
 lazy_static = "1"
