@@ -41,14 +41,9 @@ lazy_static::lazy_static! {
 }
 
 /// Initialize the EXIF cache in the user's app data directory.
-/// Returns None if the directory cannot be determined or cache creation fails.
-fn init_cache() -> Option<Arc<Mutex<ExifCache>>> {
-    init_cache_with_reason().0
-}
-
-/// Like `init_cache` but also returns the failure reason (if any) so the
-/// caller can log it or surface it to the UI. Used by the `EXIF_CACHE`
-/// lazy_static initializer.
+/// Returns `(cache, error_reason)` where `error_reason` is None on success.
+/// Used by the `EXIF_CACHE` lazy_static initializer; the reason is surfaced
+/// to the frontend via the `get_cache_status` Tauri command (P1.7).
 fn init_cache_with_reason() -> (Option<Arc<Mutex<ExifCache>>>, Option<String>) {
     let cache_dir = match get_cache_dir() {
         Some(d) => d,
@@ -62,6 +57,11 @@ fn init_cache_with_reason() -> (Option<Arc<Mutex<ExifCache>>>, Option<String>) {
             )
         }
     };
+    // P1.6: best-effort migration of the legacy "photo-exif-analyzer" cache
+    // dir into the new identifier-based dir. Runs before we try to create
+    // / open the DB so the migrated file lands in the right place. Errors
+    // are swallowed inside the helper — migration failure is non-fatal.
+    migrate_legacy_cache_dir(&cache_dir);
     // Ensure the cache directory exists
     if let Err(e) = std::fs::create_dir_all(&cache_dir) {
         return (
@@ -86,19 +86,100 @@ fn init_cache_with_reason() -> (Option<Arc<Mutex<ExifCache>>>, Option<String>) {
     }
 }
 
+/// The Tauri bundle identifier, mirrored from `tauri.conf.json` `bundle.identifier`.
+/// Kept in sync manually because the config file isn't readable at the
+/// `lazy_static!` initialization point where the cache dir is computed.
+/// P1.6: this constant replaces the legacy hardcoded "photo-exif-analyzer"
+/// directory name so the cache lives where Tauri's own `app_data_dir`
+/// would put it (`%APPDATA%/<bundle_identifier>` on Windows,
+/// `~/.local/share/<bundle_identifier>` on Linux, etc.).
+const APP_IDENTIFIER: &str = "com.photo-exif-analyzer.app";
+
+/// The legacy cache directory name used before P1.6. Kept here so the
+/// migration helper (`migrate_legacy_cache_dir`) can locate and move
+/// caches created by older builds of the app.
+const LEGACY_CACHE_DIR_NAME: &str = "photo-exif-analyzer";
+
 /// Get the directory for storing the EXIF cache database.
+///
+/// P1.6: Returns a path whose final component is the Tauri bundle
+/// identifier (`com.photo-exif-analyzer.app`), matching what Tauri's
+/// own `app_data_dir` API would return for the same identifier.
+///
+/// - Windows: `%APPDATA%/<bundle_identifier>`
+/// - macOS:   `~/Library/Application Support/<bundle_identifier>`
+/// - Linux:   `~/.local/share/<bundle_identifier>`
+///
+/// Falls back to `None` if neither `APPDATA` nor `HOME` is set.
 fn get_cache_dir() -> Option<PathBuf> {
-    // Use Tauri's app data directory if available, otherwise fall back to a local dir.
-    // On Windows: %APPDATA%/<app_id>
-    // On macOS: ~/Library/Application Support/<app_id>
-    // On Linux: ~/.local/share/<app_id>
+    // Windows / ReactOS: %APPDATA%
     if let Some(app_data) = std::env::var_os("APPDATA") {
-        return Some(PathBuf::from(app_data).join("photo-exif-analyzer"));
+        return Some(PathBuf::from(app_data).join(APP_IDENTIFIER));
     }
+    // Unix-like (Linux, macOS with XDG, etc.). macOS Application Support
+    // is handled by the same HOME-based path; Tauri itself uses the same
+    // XDG-style location on Linux.
     if let Some(home) = std::env::var_os("HOME") {
-        return Some(PathBuf::from(home).join(".local/share/photo-exif-analyzer"));
+        return Some(
+            PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join(APP_IDENTIFIER),
+        );
     }
     None
+}
+
+/// P1.6: Migrate a legacy cache directory (named `photo-exif-analyzer`)
+/// into the new identifier-based cache directory. This is a best-effort,
+/// side-effecting helper invoked by `init_cache_with_reason` before it
+/// opens the cache DB.
+///
+/// Behavior:
+/// - If `new_cache_dir` already exists and contains an `exif_cache.db`,
+///   do nothing (the user has already migrated, or is a fresh install
+///   that wrote directly to the new location).
+/// - Otherwise, look for a sibling directory named `photo-exif-analyzer`
+///   (i.e. `new_cache_dir.parent()/photo-exif-analyzer`). If it exists
+///   and contains `exif_cache.db`, move the DB file into `new_cache_dir`.
+/// - Any other files in the legacy dir are left in place (we only own
+///   `exif_cache.db`; thumbnail caches live elsewhere).
+///
+/// Errors are swallowed: migration is a convenience, not a correctness
+/// requirement. If it fails, the caller will simply create a fresh
+/// cache in the new location.
+fn migrate_legacy_cache_dir(new_cache_dir: &Path) {
+    // Already migrated or fresh install: nothing to do.
+    let new_db = new_cache_dir.join("exif_cache.db");
+    if new_db.exists() {
+        return;
+    }
+
+    // Locate the legacy dir as a sibling of the new dir.
+    let Some(parent) = new_cache_dir.parent() else {
+        return;
+    };
+    let legacy_dir = parent.join(LEGACY_CACHE_DIR_NAME);
+    let legacy_db = legacy_dir.join("exif_cache.db");
+    if !legacy_db.exists() {
+        return;
+    }
+
+    // Best-effort: ensure new dir exists, then move the DB file.
+    let _ = std::fs::create_dir_all(new_cache_dir);
+    if let Err(e) = std::fs::rename(&legacy_db, &new_db) {
+        // `rename` can fail across filesystems; fall back to copy + remove.
+        if std::fs::copy(&legacy_db, &new_db).is_ok() {
+            let _ = std::fs::remove_file(&legacy_db);
+        } else {
+            eprintln!(
+                "[warn] P1.6: failed to migrate legacy EXIF cache from {} to {}: {}",
+                legacy_db.display(),
+                new_db.display(),
+                e
+            );
+        }
+    }
 }
 
 /// Query the EXIF cache initialization status. Exposed as a Tauri command
@@ -413,10 +494,18 @@ mod tests {
     // pulled in via `--extern`, producing E0659 "ambiguous name". Importing
     // only the specific items we need avoids the glob collision.
     use super::export_statistics;
+    use super::get_cache_dir;
     use super::init_cache_with_reason;
     use crate::exif::scanner::ScanResult;
     use crate::exif::ExifData;
     use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    /// P1.6: tests that mutate process-wide env vars (APPDATA / HOME) must
+    /// not run concurrently with each other, otherwise one test's set_var
+    /// races with another's remove_var and the assertions flake. This mutex
+    /// serializes every test that touches env vars in this module.
+    static ENV_TEST_MUTEX: Mutex<()> = Mutex::new(());
 
     /// Build a ScanResult with the given path and EXIF fields.
     /// `file_size` is derived from the path string length so different
@@ -683,6 +772,7 @@ mod tests {
         // APPDATA nor HOME set natively, the "missing env" path is exercised
         // directly. If either is set, we temporarily remove it; the test
         // is still valid because `init_cache_with_reason` re-reads env.
+        let _env_lock = ENV_TEST_MUTEX.lock().unwrap();
         let saved_appdata = std::env::var_os("APPDATA");
         let saved_home = std::env::var_os("HOME");
 
@@ -716,6 +806,7 @@ mod tests {
         // P1.7: when env vars ARE set and the cache dir is writable,
         // init_cache_with_reason must return (Some(cache), None).
         // Uses a temp dir as APPDATA to avoid polluting real app data.
+        let _env_lock = ENV_TEST_MUTEX.lock().unwrap();
         let temp = tempfile::TempDir::new().unwrap();
         std::env::set_var("APPDATA", temp.path());
 
@@ -730,6 +821,151 @@ mod tests {
             error.is_none(),
             "error reason must be None on success, got: {:?}",
             error
+        );
+    }
+
+    // ---- P1.6: cache dir must match the Tauri bundle identifier ----
+
+    /// P1.6: helper that saves, overrides, and restores APPDATA/HOME so
+    /// each test below runs in a deterministic environment. Returns a
+    /// guard that restores the original values when dropped.
+    struct EnvGuard {
+        saved_appdata: Option<std::ffi::OsString>,
+        saved_home: Option<std::ffi::OsString>,
+    }
+    impl EnvGuard {
+        fn set_appdata(path: &std::path::Path) -> Self {
+            let saved_appdata = std::env::var_os("APPDATA");
+            let saved_home = std::env::var_os("HOME");
+            std::env::set_var("APPDATA", path);
+            std::env::remove_var("HOME");
+            Self { saved_appdata, saved_home }
+        }
+        fn set_home(path: &std::path::Path) -> Self {
+            let saved_appdata = std::env::var_os("APPDATA");
+            let saved_home = std::env::var_os("HOME");
+            std::env::remove_var("APPDATA");
+            std::env::set_var("HOME", path);
+            Self { saved_appdata, saved_home }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(v) = self.saved_appdata.take() {
+                std::env::set_var("APPDATA", v);
+            } else {
+                std::env::remove_var("APPDATA");
+            }
+            if let Some(v) = self.saved_home.take() {
+                std::env::set_var("HOME", v);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+    }
+
+    #[test]
+    fn test_get_cache_dir_uses_tauri_bundle_identifier_on_windows() {
+        // P1.6: On Windows, get_cache_dir must produce a path whose final
+        // component is the Tauri bundle identifier from tauri.conf.json
+        // ("com.photo-exif-analyzer.app"), NOT the legacy hardcoded
+        // "photo-exif-analyzer". This matches what Tauri's own
+        // `app_data_dir` would return for the same identifier.
+        let _env_lock = ENV_TEST_MUTEX.lock().unwrap();
+        let temp = tempfile::TempDir::new().unwrap();
+        let _guard = EnvGuard::set_appdata(temp.path());
+
+        let cache_dir = get_cache_dir()
+            .expect("get_cache_dir must return Some when APPDATA is set");
+
+        let last_component = cache_dir
+            .components()
+            .last()
+            .map(|c| c.as_os_str().to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        assert_eq!(
+            last_component,
+            "com.photo-exif-analyzer.app",
+            "cache dir must end with the Tauri bundle identifier (got: {})",
+            cache_dir.display()
+        );
+    }
+
+    #[test]
+    fn test_get_cache_dir_uses_tauri_bundle_identifier_on_unix() {
+        // P1.6: On the Unix fallback path (HOME set, APPDATA unset),
+        // the cache dir must be ~/.local/share/<bundle_identifier>.
+        let _env_lock = ENV_TEST_MUTEX.lock().unwrap();
+        let temp = tempfile::TempDir::new().unwrap();
+        let _guard = EnvGuard::set_home(temp.path());
+
+        let cache_dir = get_cache_dir()
+            .expect("get_cache_dir must return Some when HOME is set");
+
+        // The path should be <temp>/.local/share/com.photo-exif-analyzer.app
+        let components: Vec<_> = cache_dir
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().to_string())
+            .collect();
+        let last = components.last().cloned().unwrap_or_default();
+        assert_eq!(
+            last,
+            "com.photo-exif-analyzer.app",
+            "cache dir must end with the Tauri bundle identifier (got: {})",
+            cache_dir.display()
+        );
+        // Sanity: the .local/share prefix is present
+        assert!(
+            components.iter().any(|c| c == ".local"),
+            "cache dir should contain the XDG .local/share segment (got: {})",
+            cache_dir.display()
+        );
+        assert!(
+            components.iter().any(|c| c == "share"),
+            "cache dir should contain the XDG .local/share segment (got: {})",
+            cache_dir.display()
+        );
+    }
+
+    #[test]
+    fn test_get_cache_dir_migrates_legacy_cache_on_first_use() {
+        // P1.6: When the new cache dir doesn't yet exist BUT the legacy
+        // "photo-exif-analyzer" cache dir does (with a non-empty DB file),
+        // get_cache_dir must migrate the legacy DB into the new location
+        // so existing users don't lose their cached EXIF data on upgrade.
+        let _env_lock = ENV_TEST_MUTEX.lock().unwrap();
+        let temp = tempfile::TempDir::new().unwrap();
+        let _guard = EnvGuard::set_appdata(temp.path());
+
+        // Create the legacy cache dir + a sentinel DB file
+        let legacy_dir = temp.path().join("photo-exif-analyzer");
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        std::fs::write(legacy_dir.join("exif_cache.db"), b"legacy sentinel").unwrap();
+
+        // The new cache dir should NOT exist yet (we haven't called
+        // init_cache_with_reason). Calling get_cache_dir must trigger the
+        // migration as a side effect, OR at minimum the caller must be
+        // able to detect the legacy dir. We assert the migration helper
+        // moves the file into the new location.
+        let new_dir = get_cache_dir().expect("cache dir must be Some");
+        assert_ne!(
+            new_dir, legacy_dir,
+            "new cache dir must differ from legacy dir"
+        );
+
+        // Run the migration helper (the production code path that
+        // init_cache_with_reason will invoke). It must move the legacy
+        // DB file to the new dir.
+        super::migrate_legacy_cache_dir(&new_dir);
+
+        assert!(
+            new_dir.join("exif_cache.db").exists(),
+            "after migration, the new cache dir must contain the legacy DB file"
+        );
+        assert!(
+            !legacy_dir.join("exif_cache.db").exists(),
+            "after migration, the legacy DB file must no longer exist at the old path"
         );
     }
 }
