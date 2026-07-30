@@ -3,6 +3,7 @@ import { useAppStore } from './store'
 import { Button } from '@/components/ui/button'
 import { FocalLengthChart } from './components/FocalLengthChart'
 import { DistributionChart } from './components/DistributionChart'
+import { FilterPanel } from './components/FilterPanel'
 
 function App() {
   const {
@@ -59,53 +60,58 @@ function App() {
       {/* Main Content */}
       <div className="flex h-[calc(100vh-65px)]">
         {/* Sidebar - Statistics */}
-        <aside className="w-80 border-r border-border p-4 overflow-y-auto">
-          <h2 className="text-lg font-semibold mb-4">统计信息</h2>
+        <aside className="w-80 border-r border-border overflow-y-auto">
+          <div className="p-4">
+            <h2 className="text-lg font-semibold mb-4">统计信息</h2>
 
-          {cameraStats && cameraStats.cameras.length > 0 && (
-            <div className="mb-6">
-              <h3 className="text-sm font-medium text-muted-foreground mb-2">
-                相机 (共 {cameraStats.total} 张)
-              </h3>
-              <DistributionChart
-                data={cameraStats.cameras.map((c) => ({
-                  name: c.name,
-                  value: c.count,
-                  percentage: c.percentage,
-                }))}
-                title="相机"
-              />
-            </div>
-          )}
+            {cameraStats && cameraStats.cameras.length > 0 && (
+              <div className="mb-6">
+                <h3 className="text-sm font-medium text-muted-foreground mb-2">
+                  相机 (共 {cameraStats.total} 张)
+                </h3>
+                <DistributionChart
+                  data={cameraStats.cameras.map((c) => ({
+                    name: c.name,
+                    value: c.count,
+                    percentage: c.percentage,
+                  }))}
+                  title="相机"
+                />
+              </div>
+            )}
 
-          {lensStats && lensStats.lenses.length > 0 && (
-            <div className="mb-6">
-              <h3 className="text-sm font-medium text-muted-foreground mb-2">
-                镜头 (共 {lensStats.total} 张)
-              </h3>
-              <DistributionChart
-                data={lensStats.lenses.map((l) => ({
-                  name: l.name,
-                  value: l.count,
-                  percentage: l.percentage,
-                }))}
-                title="镜头"
-              />
-            </div>
-          )}
+            {lensStats && lensStats.lenses.length > 0 && (
+              <div className="mb-6">
+                <h3 className="text-sm font-medium text-muted-foreground mb-2">
+                  镜头 (共 {lensStats.total} 张)
+                </h3>
+                <DistributionChart
+                  data={lensStats.lenses.map((l) => ({
+                    name: l.name,
+                    value: l.count,
+                    percentage: l.percentage,
+                  }))}
+                  title="镜头"
+                />
+              </div>
+            )}
 
-          {focalLengthStats && focalLengthStats.ranges.length > 0 && (
-            <div className="mb-6">
-              <h3 className="text-sm font-medium text-muted-foreground mb-2">
-                焦距分布 (共 {focalLengthStats.total} 张)
-              </h3>
-              <FocalLengthChart stats={focalLengthStats} />
-            </div>
-          )}
+            {focalLengthStats && focalLengthStats.ranges.length > 0 && (
+              <div className="mb-6">
+                <h3 className="text-sm font-medium text-muted-foreground mb-2">
+                  焦距分布 (共 {focalLengthStats.total} 张)
+                </h3>
+                <FocalLengthChart stats={focalLengthStats} />
+              </div>
+            )}
 
-          {!cameraStats && !isScanning && (
-            <p className="text-sm text-muted-foreground">选择一个文件夹开始分析</p>
-          )}
+            {!cameraStats && !isScanning && (
+              <p className="text-sm text-muted-foreground">选择一个文件夹开始分析</p>
+            )}
+          </div>
+
+          {/* Filter Panel */}
+          <FilterPanel />
         </aside>
 
         {/* Main Area */}
