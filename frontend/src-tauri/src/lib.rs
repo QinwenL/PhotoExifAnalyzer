@@ -1,9 +1,10 @@
 pub mod exif;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use exif::scanner::{scan_directory, scan_directory_with_callback, ScanResult};
+use exif::cache::ExifCache;
+use exif::scanner::{scan_directory, scan_directory_with_cache, ScanResult};
 use exif::stats::{
     calculate_camera_stats, calculate_focal_length_stats, calculate_lens_stats,
     filter_results, CameraStats, FilterCriteria, FocalLengthStats, LensStats,
@@ -14,6 +15,38 @@ use exif::thumbnail::{get_thumbnail_path, get_image_base64};
 
 lazy_static::lazy_static! {
     static ref SCAN_CANCELLED: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+    /// Global EXIF cache stored in the app's data directory.
+    /// Initialized lazily on first scan; shared across all scan operations.
+    static ref EXIF_CACHE: Option<Arc<Mutex<ExifCache>>> = init_cache();
+}
+
+/// Initialize the EXIF cache in the user's app data directory.
+/// Returns None if the directory cannot be determined or cache creation fails.
+fn init_cache() -> Option<Arc<Mutex<ExifCache>>> {
+    let cache_dir = get_cache_dir()?;
+    // Ensure the cache directory exists
+    if std::fs::create_dir_all(&cache_dir).is_err() {
+        return None;
+    }
+    match ExifCache::new(&cache_dir) {
+        Ok(cache) => Some(Arc::new(Mutex::new(cache))),
+        Err(_) => None,
+    }
+}
+
+/// Get the directory for storing the EXIF cache database.
+fn get_cache_dir() -> Option<PathBuf> {
+    // Use Tauri's app data directory if available, otherwise fall back to a local dir.
+    // On Windows: %APPDATA%/<app_id>
+    // On macOS: ~/Library/Application Support/<app_id>
+    // On Linux: ~/.local/share/<app_id>
+    if let Some(app_data) = std::env::var_os("APPDATA") {
+        return Some(PathBuf::from(app_data).join("photo-exif-analyzer"));
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return Some(PathBuf::from(home).join(".local/share/photo-exif-analyzer"));
+    }
+    None
 }
 
 #[tauri::command]
@@ -27,9 +60,13 @@ fn scan_images_with_progress(dir: String, recursive: bool) -> Vec<ScanResult> {
     *SCAN_CANCELLED.lock().unwrap() = false;
     let cancelled = Arc::clone(&SCAN_CANCELLED);
 
-    scan_directory_with_callback(
+    // Use the global EXIF cache — dramatically reduces disk I/O on repeat scans
+    let cache = EXIF_CACHE.as_ref().cloned();
+
+    scan_directory_with_cache(
         &dir,
         recursive,
+        cache,
         |_| {},
         move || *cancelled.lock().unwrap(),
     )

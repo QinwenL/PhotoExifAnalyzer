@@ -6,7 +6,12 @@ use rayon::prelude::*;
 use walkdir::WalkDir;
 
 use super::ExifData;
+use super::cache::ExifCache;
 use super::parser::parse_exif;
+
+/// Maximum number of concurrent I/O threads to avoid disk contention.
+/// HDDs benefit from low concurrency (2-4); SSDs can handle more.
+const MAX_IO_THREADS: usize = 4;
 
 const IMAGE_EXTENSIONS: &[&str] = &[
     "jpg", "jpeg", "jpe", "jif", "jfif",
@@ -70,6 +75,24 @@ pub fn scan_directory_with_callback<P: AsRef<Path>>(
     progress_callback: impl Fn(f64) + Send + Sync + 'static,
     cancel_check: impl Fn() -> bool + Send + Sync + 'static,
 ) -> Vec<ScanResult> {
+    scan_directory_with_cache(dir, recursive, None, progress_callback, cancel_check)
+}
+
+/// Scan a directory for images with EXIF caching and I/O concurrency limiting.
+///
+/// # Arguments
+/// * `dir` - Directory to scan
+/// * `recursive` - Whether to scan subdirectories
+/// * `cache` - Optional EXIF cache (wrapped in `Arc<Mutex<ExifCache>>` for thread safety)
+/// * `progress_callback` - Called with progress percentage (0-100)
+/// * `cancel_check` - Returns true if the scan should be cancelled
+pub fn scan_directory_with_cache<P: AsRef<Path>>(
+    dir: P,
+    recursive: bool,
+    cache: Option<Arc<Mutex<ExifCache>>>,
+    progress_callback: impl Fn(f64) + Send + Sync + 'static,
+    cancel_check: impl Fn() -> bool + Send + Sync + 'static,
+) -> Vec<ScanResult> {
     let dir = dir.as_ref();
 
     if !dir.exists() || !dir.is_dir() {
@@ -106,17 +129,29 @@ pub fn scan_directory_with_callback<P: AsRef<Path>>(
     let progress = Arc::new(RwLock::new(ScanProgress::new(total_files)));
     let results = Arc::new(Mutex::new(Vec::new()));
 
-    image_paths.par_iter().for_each(|path| {
-        if cancel_check() {
-            return;
-        }
+    // Build a limited thread pool to avoid disk I/O contention.
+    // When cache is populated, most lookups are fast SQLite reads;
+    // for cache misses, this limits concurrent disk reads to MAX_IO_THREADS.
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(MAX_IO_THREADS)
+        .build()
+        .expect("Failed to create I/O thread pool");
 
-        let result = process_image(path);
-        results.lock().unwrap().push(result);
+    let cache_clone = cache.clone();
+    pool.install(|| {
+        image_paths.par_iter().for_each(|path| {
+            if cancel_check() {
+                return;
+            }
 
-        let mut p = progress.write().unwrap();
-        p.increment();
-        progress_callback(p.percentage());
+            let result = process_image_with_cache(path, cache_clone.as_ref());
+
+            results.lock().unwrap().push(result);
+
+            let mut p = progress.write().unwrap();
+            p.increment();
+            progress_callback(p.percentage());
+        });
     });
 
     if cancel_check() {
@@ -129,16 +164,40 @@ pub fn scan_directory_with_callback<P: AsRef<Path>>(
     }
 }
 
-fn process_image(path: &Path) -> ScanResult {
+/// Process a single image, using cache if available.
+///
+/// Cache hit: returns cached EXIF data without reading the file.
+/// Cache miss: parses EXIF from disk, then stores result in cache.
+fn process_image_with_cache(path: &Path, cache: Option<&Arc<Mutex<ExifCache>>>) -> ScanResult {
     let file_size = path
         .metadata()
         .map(|m| m.len())
         .unwrap_or(0);
 
+    // 1. Check cache (fast SQLite lookup under mutex)
+    if let Some(cache) = cache {
+        if let Some(cached_exif) = cache.lock().unwrap().get(path) {
+            return ScanResult {
+                path: path.to_path_buf(),
+                exif: cached_exif,
+                file_size,
+                error: None,
+            };
+        }
+    }
+
+    // 2. Cache miss — parse EXIF from disk
     let (exif, error) = match parse_exif(path) {
         Ok(exif) => (exif, None),
         Err(e) => (ExifData::new(), Some(e)),
     };
+
+    // 3. Store successful parse results in cache
+    if let Some(cache) = cache {
+        if error.is_none() {
+            let _ = cache.lock().unwrap().set(path, &exif);
+        }
+    }
 
     ScanResult {
         path: path.to_path_buf(),
@@ -259,6 +318,105 @@ mod tests {
             true,
             |_| {},
             || true,
+        );
+
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_scan_with_cache_hit_returns_cached_data() {
+        let temp_dir = TempDir::new().unwrap();
+        let image_path = create_test_image(temp_dir.path(), "cached.jpg");
+
+        // Pre-populate cache with known EXIF data
+        let cache = ExifCache::new(temp_dir.path()).unwrap();
+        let test_exif = ExifData {
+            make: Some("TestCamera".to_string()),
+            model: Some("TestModel".to_string()),
+            focal_length: Some(50.0),
+            ..Default::default()
+        };
+        cache.set(&image_path, &test_exif).unwrap();
+
+        // Scan with cache — should return cached EXIF without disk parsing
+        let cache = Arc::new(Mutex::new(cache));
+        let results = scan_directory_with_cache(
+            temp_dir.path(),
+            true,
+            Some(cache),
+            |_| {},
+            || false,
+        );
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].exif.make.as_deref(), Some("TestCamera"));
+        assert_eq!(results[0].exif.model.as_deref(), Some("TestModel"));
+        assert_eq!(results[0].exif.focal_length, Some(50.0));
+        // Cache hit means no parse error
+        assert!(results[0].error.is_none());
+    }
+
+    #[test]
+    fn test_scan_without_cache_still_works() {
+        let temp_dir = TempDir::new().unwrap();
+        create_test_image(temp_dir.path(), "photo1.jpg");
+        create_test_image(temp_dir.path(), "photo2.jpg");
+
+        let results = scan_directory_with_cache(
+            temp_dir.path(),
+            true,
+            None,
+            |_| {},
+            || false,
+        );
+
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_scan_cache_miss_does_not_store_failed_parse() {
+        let temp_dir = TempDir::new().unwrap();
+        // Minimal JPEG without EXIF — parse_exif will return Err
+        create_test_image(temp_dir.path(), "noexif.jpg");
+
+        let cache = ExifCache::new(temp_dir.path()).unwrap();
+        let cache = Arc::new(Mutex::new(cache));
+
+        let results = scan_directory_with_cache(
+            temp_dir.path(),
+            true,
+            Some(Arc::clone(&cache)),
+            |_| {},
+            || false,
+        );
+
+        assert_eq!(results.len(), 1);
+        // Parse failed on minimal JPEG (no EXIF), so error should be set
+        assert!(results[0].error.is_some());
+        // Cache should NOT store failed parses
+        let stats = cache.lock().unwrap().stats();
+        assert_eq!(stats.total_entries, 0);
+    }
+
+    #[test]
+    fn test_scan_with_cache_cancelled() {
+        let temp_dir = TempDir::new().unwrap();
+        let image_path = create_test_image(temp_dir.path(), "photo.jpg");
+
+        let cache = ExifCache::new(temp_dir.path()).unwrap();
+        let test_exif = ExifData {
+            make: Some("Canon".to_string()),
+            ..Default::default()
+        };
+        cache.set(&image_path, &test_exif).unwrap();
+
+        let cache = Arc::new(Mutex::new(cache));
+        let results = scan_directory_with_cache(
+            temp_dir.path(),
+            true,
+            Some(cache),
+            |_| {},
+            || true, // cancel immediately
         );
 
         assert!(results.is_empty());
