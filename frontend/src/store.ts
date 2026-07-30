@@ -98,6 +98,10 @@ interface AppState {
   theme: 'light' | 'dark' | 'system'
   detailMode: 'simple' | 'detailed'
 
+  // Delete progress
+  isDeleting: boolean
+  deleteProgress: number
+
   // Actions
   setSelectedDirectory: (dir: string | null) => void
   scanDirectory: (dir: string, recursive: boolean) => Promise<void>
@@ -145,6 +149,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     try { return (localStorage.getItem('theme') as 'light' | 'dark' | 'system') || 'system' } catch { return 'system' }
   })(),
   detailMode: 'simple',
+  isDeleting: false,
+  deleteProgress: 0,
 
   // Actions
   setSelectedDirectory: (dir) => {
@@ -230,8 +236,16 @@ export const useAppStore = create<AppState>((set, get) => ({
     const { selectedImages, scanResults } = get()
     if (selectedImages.size === 0) return
 
+    set({ isDeleting: true, deleteProgress: 0 })
+
+    const progressHandler = listen('delete_progress', (event) => {
+      set({ deleteProgress: event.payload as number })
+    })
+
     const paths = Array.from(selectedImages)
-    await invoke('delete_images', { paths })
+    await invoke('delete_images_with_progress', { paths })
+
+    await progressHandler
 
     // Remove deleted images from results
     const remaining = scanResults.filter((r) => !selectedImages.has(r.path))
@@ -239,6 +253,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       scanResults: remaining,
       filteredResults: remaining,
       selectedImages: new Set(),
+      isDeleting: false,
+      deleteProgress: 100,
     })
 
     // Update statistics

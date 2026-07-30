@@ -72,7 +72,11 @@ fn delete_images(paths: Vec<String>) -> Vec<Result<(), String>> {
 
 #[tauri::command]
 fn delete_images_with_progress(paths: Vec<String>) -> Vec<Result<(), String>> {
-    delete_files(&paths)
+    delete_files_with_progress_callback(&paths, |progress| {
+        if let Some(window) = tauri::Window::get_by_label("main") {
+            let _ = window.emit("delete_progress", progress);
+        }
+    })
 }
 
 #[tauri::command]

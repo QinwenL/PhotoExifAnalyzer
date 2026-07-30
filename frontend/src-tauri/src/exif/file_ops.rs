@@ -29,7 +29,31 @@ pub fn delete_file<P: AsRef<Path>>(path: P) -> Result<(), String> {
 /// # Returns
 /// * `Vec<Result<(), String>>` - Results for each file (in order)
 pub fn delete_files<P: AsRef<Path>>(paths: &[P]) -> Vec<Result<(), String>> {
-    paths.iter().map(|p| delete_file(p)).collect()
+    delete_files_with_progress_callback(paths, |_| {})
+}
+
+/// Delete multiple files with progress callback
+///
+/// # Arguments
+/// * `paths` - List of file paths to delete
+/// * `progress_callback` - Callback function that receives progress percentage (0-100)
+///
+/// # Returns
+/// * `Vec<Result<(), String>>` - Results for each file (in order)
+pub fn delete_files_with_progress_callback<P: AsRef<Path>>(
+    paths: &[P],
+    mut progress_callback: impl FnMut(f64) + Send + Sync + 'static,
+) -> Vec<Result<(), String>> {
+    let total = paths.len() as f64;
+    let mut results = Vec::with_capacity(paths.len());
+
+    for (i, path) in paths.iter().enumerate() {
+        results.push(delete_file(path));
+        let progress = ((i + 1) as f64 / total) * 100.0;
+        progress_callback(progress);
+    }
+
+    results
 }
 
 /// Check if a file exists
@@ -90,6 +114,25 @@ mod tests {
         let path3 = create_test_file(temp_dir.path(), "file3.txt", b"test");
 
         let results = delete_files(&[&path1, &path2, &path3]);
+        assert_eq!(results.len(), 3);
+        assert!(results.iter().all(|r| r.is_ok()));
+        assert!(!path1.exists());
+        assert!(!path2.exists());
+        assert!(!path3.exists());
+    }
+
+    #[test]
+    fn test_delete_files_with_progress_callback() {
+        let temp_dir = TempDir::new().unwrap();
+        let path1 = create_test_file(temp_dir.path(), "prog1.txt", b"hello");
+        let path2 = create_test_file(temp_dir.path(), "prog2.txt", b"world");
+        let path3 = create_test_file(temp_dir.path(), "prog3.txt", b"test");
+
+        let results = delete_files_with_progress_callback(
+            &[&path1, &path2, &path3],
+            |_progress| {},
+        );
+
         assert_eq!(results.len(), 3);
         assert!(results.iter().all(|r| r.is_ok()));
         assert!(!path1.exists());

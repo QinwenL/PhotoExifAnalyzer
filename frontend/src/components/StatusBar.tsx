@@ -8,6 +8,8 @@ export function StatusBar() {
     selectedDirectory,
     isScanning,
     scanProgress,
+    isDeleting,
+    deleteProgress,
   } = useAppStore()
 
   return (
@@ -20,6 +22,9 @@ export function StatusBar() {
         )}
         {isScanning && (
           <span className="text-primary font-medium">扫描中: {scanProgress.toFixed(0)}%</span>
+        )}
+        {isDeleting && (
+          <span className="text-destructive font-medium">删除中: {deleteProgress.toFixed(0)}%</span>
         )}
       </div>
       <div className="flex items-center gap-4">
