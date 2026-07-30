@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/tauri'
+import { withThumbnailSlot } from '../lib/semaphore'
+import { useAppStore } from '../store'
 
 interface ThumbnailProps {
   path: string
@@ -9,67 +11,52 @@ interface ThumbnailProps {
 
 export function Thumbnail({ path, maxSize = 200, className = '' }: ThumbnailProps) {
   const [src, setSrc] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState(false)
+  const { beginThumbnailLoad, completeThumbnailLoad } = useAppStore()
 
   useEffect(() => {
     let cancelled = false
 
-    invoke<string>('get_image_data', { path, maxSize })
+    beginThumbnailLoad(path)
+
+    withThumbnailSlot(() => invoke<string>('get_image_data', { path, maxSize }))
       .then((data) => {
-        if (!cancelled) {
-          setError(null)
-          setSrc(data)
-        }
+        if (!cancelled) setSrc(data)
+        if (!cancelled) completeThumbnailLoad(path, true)
       })
-      .catch((err: unknown) => {
+      .catch(() => {
         if (!cancelled) {
-          const message = err instanceof Error ? err.message : String(err)
-          console.error('[Thumbnail] Failed to load:', path, message)
-          setError(message)
+          setError(true)
+          completeThumbnailLoad(path, false)
         }
       })
 
     return () => {
       cancelled = true
+      if (!src && !error) {
+        completeThumbnailLoad(path, false)
+      }
     }
-  }, [path, maxSize])
-
-  const filename = path.split(/[/\\]/).pop() ?? path
+  }, [path, maxSize, beginThumbnailLoad, completeThumbnailLoad, src, error])
 
   if (error) {
-    const isHeicError = error.toLowerCase().includes('heic') || error.toLowerCase().includes('heif')
-    const isRawError = error.toLowerCase().includes('raw')
-    const errorMessage = isHeicError
-      ? 'HEIC 格式不支持预览'
-      : isRawError
-        ? 'RAW 格式预览不可用'
-        : '加载失败'
-
     return (
-      <div
-        className={`bg-muted flex flex-col items-center justify-center ${className}`}
-        title={`${filename}: ${error}`}
-      >
-        <span className="text-[10px] text-muted-foreground truncate px-1 max-w-full">
-          {filename}
-        </span>
-        <span className="text-[8px] text-destructive truncate px-1 mt-0.5 max-w-full">
-          {errorMessage}
+      <div className={`bg-muted flex items-center justify-center ${className}`}>
+        <span className="text-[10px] text-muted-foreground truncate px-1">
+          {path.split(/[/\\]/).pop()}
         </span>
       </div>
     )
   }
 
   if (!src) {
-    return (
-      <div className={`bg-muted animate-pulse ${className}`} title={filename} />
-    )
+    return <div className={`bg-muted animate-pulse ${className}`} />
   }
 
   return (
     <img
       src={src}
-      alt={filename}
+      alt=""
       className={`object-cover w-full h-full ${className}`}
       loading="lazy"
     />
