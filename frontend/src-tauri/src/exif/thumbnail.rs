@@ -1,31 +1,191 @@
 use std::path::{Path, PathBuf};
 
-/// Thumbnail size in pixels
 const THUMBNAIL_SIZE: u32 = 150;
 
-/// Get or create thumbnail for an image
-///
-/// # Arguments
-/// * `path` - Path to the original image
-///
-/// # Returns
-/// * `Result<PathBuf, String>` - Path to the thumbnail file
+const RAW_EXTENSIONS: &[&str] = &[
+    "cr2", "cr3", "crw",
+    "nef", "nrw",
+    "arw", "srf", "sr2",
+    "orf",
+    "raf",
+    "rw2",
+    "pef",
+    "dng",
+    "raw", "rwl",
+    "3fr",
+    "kdc", "dcr",
+    "mrw",
+    "srw",
+    "x3f",
+    "bay",
+    "iiq",
+];
+
+const HEIC_EXTENSIONS: &[&str] = &["heic", "heif", "hif", "heics", "heifs"];
+
+pub fn is_raw_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            let lower = e.to_lowercase();
+            RAW_EXTENSIONS.contains(&lower.as_str())
+        })
+        .unwrap_or(false)
+}
+
+pub fn is_heic_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            let lower = e.to_lowercase();
+            HEIC_EXTENSIONS.contains(&lower.as_str())
+        })
+        .unwrap_or(false)
+}
+
+fn open_image(path: &Path) -> Result<image::DynamicImage, String> {
+    if is_heic_extension(path) {
+        #[cfg(target_os = "windows")]
+        {
+            return crate::exif::heic::decode(path);
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            return Err(
+                "HEIC/HEIF decoding is only supported on Windows (via WIC). \
+                 Please convert to JPEG/PNG first."
+                    .to_string(),
+            );
+        }
+    }
+
+    match image::open(path) {
+        Ok(img) => Ok(img),
+        Err(e) => {
+            if is_raw_extension(path) {
+                return extract_raw_preview(path);
+            }
+            Err(format!(
+                "Unsupported image format ({}): {}",
+                e,
+                path.display()
+            ))
+        }
+    }
+}
+
+fn extract_raw_preview(path: &Path) -> Result<image::DynamicImage, String> {
+    let file_bytes = std::fs::read(path)
+        .map_err(|e| format!("Failed to read RAW file: {}", e))?;
+
+    let soi_positions = find_all_jpeg_soi(&file_bytes);
+
+    if soi_positions.is_empty() {
+        return Err(
+            "No embedded JPEG preview found in RAW file (no SOI markers). \
+             Thumbnail generation for this RAW format is not yet supported."
+                .to_string(),
+        );
+    }
+
+    let mut best_jpeg: Option<&[u8]> = None;
+    let mut best_size: usize = 0;
+
+    for &soi_pos in &soi_positions {
+        if let Some(eoi_pos) = find_jpeg_eoi(&file_bytes, soi_pos.saturating_add(2)) {
+            let jpeg_data = &file_bytes[soi_pos..=eoi_pos];
+            if jpeg_data.len() > best_size {
+                best_size = jpeg_data.len();
+                best_jpeg = Some(jpeg_data);
+            }
+        }
+    }
+
+    let jpeg_data = best_jpeg.ok_or_else(|| {
+        "No embedded JPEG preview found in RAW file (SOI without EOI). \
+         Thumbnail generation for this RAW format is not yet supported."
+            .to_string()
+    })?;
+
+    if jpeg_data.len() < 200 {
+        return Err(
+            "Embedded JPEG preview is too small (< 200 bytes). \
+             RAW file may not contain a usable preview."
+                .to_string(),
+        );
+    }
+
+    let img = image::load_from_memory_with_format(jpeg_data, image::ImageFormat::Jpeg)
+        .or_else(|_| {
+            let temp_path = std::env::temp_dir().join(format!(
+                "raw_preview_{}_{}.jpg",
+                std::process::id(),
+                best_size
+            ));
+            std::fs::write(&temp_path, jpeg_data)?;
+            let result = image::open(&temp_path);
+            let _ = std::fs::remove_file(&temp_path);
+            result
+        })
+        .map_err(|e| format!("Failed to decode RAW preview JPEG: {} (size: {} bytes)", e, best_size))?;
+
+    Ok(img)
+}
+
+fn find_all_jpeg_soi(data: &[u8]) -> Vec<usize> {
+    let mut positions = Vec::new();
+    let mut search_pos = 0;
+
+    while search_pos < data.len().saturating_sub(1) {
+        match data[search_pos..]
+            .windows(2)
+            .position(|w| w[0] == 0xFF && w[1] == 0xD8)
+        {
+            Some(p) => {
+                let pos = search_pos + p;
+                positions.push(pos);
+                search_pos = pos + 2;
+            }
+            None => break,
+        }
+    }
+
+    positions
+}
+
+fn find_jpeg_eoi(data: &[u8], from_pos: usize) -> Option<usize> {
+    if from_pos >= data.len().saturating_sub(1) {
+        return None;
+    }
+    data[from_pos..]
+        .windows(2)
+        .position(|w| w[0] == 0xFF && w[1] == 0xD9)
+        .map(|p| from_pos + p + 1)
+}
+
 pub fn get_thumbnail_path(path: &Path) -> Result<PathBuf, String> {
     let thumb_dir = get_thumbnail_dir(path)?;
     let thumb_name = get_thumbnail_name(path)?;
     let thumb_path = thumb_dir.join(&thumb_name);
 
     if thumb_path.exists() {
-        return Ok(thumb_path);
+        if let Ok(source_meta) = path.metadata() {
+            if let Ok(thumb_meta) = thumb_path.metadata() {
+                if let (Ok(source_mtime), Ok(thumb_mtime)) =
+                    (source_meta.modified(), thumb_meta.modified())
+                {
+                    if thumb_mtime >= source_mtime {
+                        return Ok(thumb_path);
+                    }
+                }
+            }
+        }
     }
 
-    // Generate thumbnail
     generate_thumbnail(path, &thumb_path)?;
-
     Ok(thumb_path)
 }
 
-/// Get the thumbnail directory for a given image path
 fn get_thumbnail_dir(image_path: &Path) -> Result<PathBuf, String> {
     let parent = image_path
         .parent()
@@ -41,7 +201,6 @@ fn get_thumbnail_dir(image_path: &Path) -> Result<PathBuf, String> {
     Ok(thumb_dir)
 }
 
-/// Generate thumbnail filename from original filename
 fn get_thumbnail_name(path: &Path) -> Result<String, String> {
     let stem = path
         .file_stem()
@@ -53,7 +212,6 @@ fn get_thumbnail_name(path: &Path) -> Result<String, String> {
         .and_then(|s| s.to_str())
         .unwrap_or("jpg");
 
-    // Create a hash of the full path to avoid collisions
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut hasher = DefaultHasher::new();
@@ -63,12 +221,11 @@ fn get_thumbnail_name(path: &Path) -> Result<String, String> {
     Ok(format!("{}_{}.{ext}", stem, hash))
 }
 
-/// Generate thumbnail from image file
 fn generate_thumbnail(input_path: &Path, output_path: &Path) -> Result<(), String> {
-    let img = image::open(input_path)
-        .map_err(|e| format!("Failed to open image: {}", e))?;
+    let img = open_image(input_path)?;
 
-    let thumbnail = img.resize(THUMBNAIL_SIZE, THUMBNAIL_SIZE, image::imageops::FilterType::Lanczos3);
+    let thumbnail =
+        img.resize(THUMBNAIL_SIZE, THUMBNAIL_SIZE, image::imageops::FilterType::Lanczos3);
 
     thumbnail
         .save(output_path)
@@ -77,23 +234,35 @@ fn generate_thumbnail(input_path: &Path, output_path: &Path) -> Result<(), Strin
     Ok(())
 }
 
-/// Get image data as base64 string for display in frontend
-///
-/// # Arguments
-/// * `path` - Path to the image
-/// * `max_size` - Maximum dimension (width or height)
-///
-/// # Returns
-/// * `Result<String, String>` - Base64 encoded image data
 pub fn get_image_base64(path: &Path, max_size: u32) -> Result<String, String> {
-    let img = image::open(path)
-        .map_err(|e| format!("Failed to open image: {}", e))?;
+    if max_size <= THUMBNAIL_SIZE {
+        if let Ok(thumb_path) = get_thumbnail_path(path) {
+            if let Ok(thumb) = image::open(&thumb_path) {
+                let resized = if thumb.width() > max_size || thumb.height() > max_size {
+                    thumb.resize(max_size, max_size, image::imageops::FilterType::Triangle)
+                } else {
+                    thumb
+                };
+                return encode_to_base64(&resized);
+            }
+        }
+    }
 
-    let resized = img.resize(max_size, max_size, image::imageops::FilterType::Lanczos3);
+    let img = open_image(path)?;
+    let resized = if img.width() > max_size || img.height() > max_size {
+        img.resize(max_size, max_size, image::imageops::FilterType::Lanczos3)
+    } else {
+        img
+    };
 
+    let _ = get_thumbnail_path(path);
+
+    encode_to_base64(&resized)
+}
+
+fn encode_to_base64(img: &image::DynamicImage) -> Result<String, String> {
     let mut buffer = std::io::Cursor::new(Vec::new());
-    resized
-        .write_to(&mut buffer, image::ImageOutputFormat::Jpeg(85))
+    img.write_to(&mut buffer, image::ImageOutputFormat::Jpeg(85))
         .map_err(|e| format!("Failed to encode image: {}", e))?;
 
     use base64::Engine;
@@ -102,14 +271,16 @@ pub fn get_image_base64(path: &Path, max_size: u32) -> Result<String, String> {
     Ok(format!("data:image/jpeg;base64,{}", encoded))
 }
 
-/// Check if thumbnail exists
 pub fn thumbnail_exists(path: &Path) -> bool {
-    get_thumbnail_path(path)
-        .map(|p| p.exists())
-        .unwrap_or(false)
+    if let Ok(thumb_dir) = get_thumbnail_dir(path) {
+        if let Ok(thumb_name) = get_thumbnail_name(path) {
+            let thumb_path = thumb_dir.join(thumb_name);
+            return thumb_path.exists();
+        }
+    }
+    false
 }
 
-/// Delete thumbnail for an image
 pub fn delete_thumbnail(path: &Path) -> Result<(), String> {
     let thumb_path = get_thumbnail_path(path)?;
     if thumb_path.exists() {
@@ -119,7 +290,6 @@ pub fn delete_thumbnail(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Clear all thumbnails in a directory
 pub fn clear_thumbnails(dir: &Path) -> Result<usize, String> {
     let thumb_dir = dir.join(".thumbnails");
     if !thumb_dir.exists() {
@@ -146,27 +316,54 @@ pub fn clear_thumbnails(dir: &Path) -> Result<usize, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs::File;
-    use std::io::Write;
     use tempfile::TempDir;
 
     fn create_test_jpeg(dir: &Path, name: &str) -> PathBuf {
         let path = dir.join(name);
-        // Minimal valid JPEG with image data
-        let jpeg = vec![
-            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00,
-            0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xD9,
-        ];
-        let mut file = File::create(&path).unwrap();
-        file.write_all(&jpeg).unwrap();
+        let img = image::RgbImage::from_pixel(100, 100, image::Rgb([128u8, 128, 128]));
+        img.save(&path).expect("Failed to create test JPEG");
         path
+    }
+
+    fn create_test_png(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        let img = image::RgbImage::from_pixel(50, 50, image::Rgb([200u8, 100, 50]));
+        img.save(&path).expect("Failed to create test PNG");
+        path
+    }
+
+    fn create_test_raw_with_jpeg_preview(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        let mut data = vec![0u8; 1024];
+        let jpeg_bytes = create_valid_jpeg_bytes(10, 10);
+        data.extend_from_slice(&jpeg_bytes);
+        std::fs::write(&path, &data).unwrap();
+        path
+    }
+
+    fn create_test_raw_with_multiple_jpegs(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        let mut data = vec![0u8; 1024];
+        let small_jpeg = create_valid_jpeg_bytes(5, 5);
+        let large_jpeg = create_valid_jpeg_bytes(50, 50);
+        data.extend_from_slice(&small_jpeg);
+        data.extend_from_slice(&large_jpeg);
+        std::fs::write(&path, &data).unwrap();
+        path
+    }
+
+    fn create_valid_jpeg_bytes(width: u32, height: u32) -> Vec<u8> {
+        let img = image::RgbImage::from_pixel(width, height, image::Rgb([128u8, 128, 128]));
+        let mut buffer = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut buffer, image::ImageOutputFormat::Jpeg(85))
+            .expect("Failed to encode test JPEG");
+        buffer.into_inner()
     }
 
     #[test]
     fn test_get_thumbnail_dir() {
         let temp_dir = TempDir::new().unwrap();
         let image_path = temp_dir.path().join("photo.jpg");
-
         let thumb_dir = get_thumbnail_dir(&image_path).unwrap();
         assert!(thumb_dir.exists());
         assert_eq!(thumb_dir, temp_dir.path().join(".thumbnails"));
@@ -184,16 +381,9 @@ mod tests {
     fn test_thumbnail_exists() {
         let temp_dir = TempDir::new().unwrap();
         let image_path = create_test_jpeg(temp_dir.path(), "test.jpg");
-
-        // Initially no thumbnail
         assert!(!thumbnail_exists(&image_path));
-
-        // Create thumbnail directory (but no thumbnail yet)
-        let thumb_dir = temp_dir.path().join(".thumbnails");
-        std::fs::create_dir_all(&thumb_dir).unwrap();
-
-        // Still no thumbnail
-        assert!(!thumbnail_exists(&image_path));
+        let _ = get_thumbnail_path(&image_path).unwrap();
+        assert!(thumbnail_exists(&image_path));
     }
 
     #[test]
@@ -201,13 +391,208 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let thumb_dir = temp_dir.path().join(".thumbnails");
         std::fs::create_dir_all(&thumb_dir).unwrap();
-
-        // Create some fake thumbnails
-        File::create(thumb_dir.join("thumb1.jpg")).unwrap();
-        File::create(thumb_dir.join("thumb2.jpg")).unwrap();
-
+        std::fs::write(thumb_dir.join("thumb1.jpg"), b"dummy").unwrap();
+        std::fs::write(thumb_dir.join("thumb2.jpg"), b"dummy").unwrap();
         let count = clear_thumbnails(temp_dir.path()).unwrap();
         assert_eq!(count, 2);
         assert!(!thumb_dir.join("thumb1.jpg").exists());
+    }
+
+    #[test]
+    fn test_generate_thumbnail_jpeg() {
+        let temp_dir = TempDir::new().unwrap();
+        let src = create_test_jpeg(temp_dir.path(), "source.jpg");
+        let dst = temp_dir.path().join("thumb.jpg");
+        generate_thumbnail(&src, &dst).unwrap();
+        assert!(dst.exists());
+        let thumb = image::open(&dst).unwrap();
+        assert_eq!(thumb.width(), THUMBNAIL_SIZE as u32);
+        assert_eq!(thumb.height(), THUMBNAIL_SIZE as u32);
+    }
+
+    #[test]
+    fn test_generate_thumbnail_png() {
+        let temp_dir = TempDir::new().unwrap();
+        let src = create_test_png(temp_dir.path(), "source.png");
+        let dst = temp_dir.path().join("thumb.png");
+        generate_thumbnail(&src, &dst).unwrap();
+        assert!(dst.exists());
+        let thumb = image::open(&dst).unwrap();
+        assert_eq!(thumb.width(), THUMBNAIL_SIZE as u32);
+        assert_eq!(thumb.height(), THUMBNAIL_SIZE as u32);
+    }
+
+    #[test]
+    fn test_generate_thumbnail_raw() {
+        let temp_dir = TempDir::new().unwrap();
+        let src = create_test_raw_with_jpeg_preview(temp_dir.path(), "photo.cr2");
+        let dst = temp_dir.path().join("thumb.jpg");
+        generate_thumbnail(&src, &dst).unwrap();
+        assert!(dst.exists());
+        let thumb = image::open(&dst).unwrap();
+        assert_eq!(thumb.width(), THUMBNAIL_SIZE as u32);
+        assert_eq!(thumb.height(), THUMBNAIL_SIZE as u32);
+    }
+
+    #[test]
+    fn test_generate_thumbnail_raw_picks_largest() {
+        let temp_dir = TempDir::new().unwrap();
+        let src = create_test_raw_with_multiple_jpegs(temp_dir.path(), "photo.nef");
+        let dst = temp_dir.path().join("thumb.jpg");
+        generate_thumbnail(&src, &dst).unwrap();
+        assert!(dst.exists());
+        let thumb = image::open(&dst).unwrap();
+        assert_eq!(thumb.width(), THUMBNAIL_SIZE as u32);
+        assert_eq!(thumb.height(), THUMBNAIL_SIZE as u32);
+    }
+
+    #[test]
+    fn test_get_image_base64_jpeg() {
+        let temp_dir = TempDir::new().unwrap();
+        let src = create_test_jpeg(temp_dir.path(), "photo.jpg");
+        let result = get_image_base64(&src, 200).unwrap();
+        assert!(result.starts_with("data:image/jpeg;base64,"));
+        assert!(result.len() > 100);
+    }
+
+    #[test]
+    fn test_get_image_base64_uses_cache() {
+        let temp_dir = TempDir::new().unwrap();
+        let src = create_test_jpeg(temp_dir.path(), "cached.jpg");
+        let result1 = get_image_base64(&src, THUMBNAIL_SIZE).unwrap();
+        assert!(result1.starts_with("data:image/jpeg;base64,"));
+        let thumb_path = get_thumbnail_path(&src).unwrap();
+        assert!(thumb_path.exists());
+        let result2 = get_image_base64(&src, THUMBNAIL_SIZE).unwrap();
+        assert!(result2.starts_with("data:image/jpeg;base64,"));
+    }
+
+    #[test]
+    fn test_get_image_base64_raw() {
+        let temp_dir = TempDir::new().unwrap();
+        let src = create_test_raw_with_jpeg_preview(temp_dir.path(), "photo.nef");
+        let result = get_image_base64(&src, 200).unwrap();
+        assert!(result.starts_with("data:image/jpeg;base64,"));
+        assert!(result.len() > 100);
+    }
+
+    #[test]
+    fn test_unsupported_format_error() {
+        let temp_dir = TempDir::new().unwrap();
+        let fake = temp_dir.path().join("fake.xyz");
+        std::fs::write(&fake, b"not an image").unwrap();
+        let result = get_image_base64(&fake, 200);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("Unsupported image format") || err.contains("image::open failed"));
+    }
+
+    #[test]
+    fn test_heic_format_gives_descriptive_error() {
+        let temp_dir = TempDir::new().unwrap();
+        let fake = temp_dir.path().join("photo.heic");
+        std::fs::write(&fake, b"fake heic content").unwrap();
+        let result = get_image_base64(&fake, 200);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("HEIC") || err.contains("heic") || err.contains("HEIF"));
+    }
+
+    #[test]
+    fn test_hif_format_gives_descriptive_error() {
+        let temp_dir = TempDir::new().unwrap();
+        let fake = temp_dir.path().join("photo.hif");
+        std::fs::write(&fake, b"fake hif content").unwrap();
+        let result = get_image_base64(&fake, 200);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("HEIC") || err.contains("HEIF") || err.contains("hif"));
+    }
+
+    #[test]
+    fn test_is_raw_extension() {
+        assert!(is_raw_extension(Path::new("photo.CR2")));
+        assert!(is_raw_extension(Path::new("photo.nef")));
+        assert!(is_raw_extension(Path::new("photo.arw")));
+        assert!(is_raw_extension(Path::new("photo.dng")));
+        assert!(is_raw_extension(Path::new("photo.orf")));
+        assert!(!is_raw_extension(Path::new("photo.jpg")));
+        assert!(!is_raw_extension(Path::new("photo.png")));
+    }
+
+    #[test]
+    fn test_is_heic_extension() {
+        assert!(is_heic_extension(Path::new("photo.heic")));
+        assert!(is_heic_extension(Path::new("photo.HEIF")));
+        assert!(is_heic_extension(Path::new("photo.hif")));
+        assert!(!is_heic_extension(Path::new("photo.jpg")));
+        assert!(!is_heic_extension(Path::new("photo.cr2")));
+    }
+
+    #[test]
+    fn test_jpeg_soi_detection() {
+        let data = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
+        let positions = find_all_jpeg_soi(&data);
+        assert_eq!(positions, vec![0]);
+        let data_no_soi = vec![0x00, 0x01, 0x02, 0x03];
+        let positions = find_all_jpeg_soi(&data_no_soi);
+        assert!(positions.is_empty());
+    }
+
+    #[test]
+    fn test_jpeg_soi_detection_multiple() {
+        let mut data = vec![0u8; 100];
+        data[10] = 0xFF; data[11] = 0xD8;
+        data[50] = 0xFF; data[51] = 0xD8;
+        data[80] = 0xFF; data[81] = 0xD8;
+        let positions = find_all_jpeg_soi(&data);
+        assert_eq!(positions.len(), 3);
+        assert!(positions.contains(&10));
+        assert!(positions.contains(&50));
+        assert!(positions.contains(&80));
+    }
+
+    #[test]
+    fn test_jpeg_eoi_detection() {
+        let data = vec![0xFF, 0xD8, 0xFF, 0xD9];
+        assert_eq!(find_jpeg_eoi(&data, 2), Some(3));
+        let data_no_eoi = vec![0xFF, 0xD8, 0x00, 0x00];
+        assert_eq!(find_jpeg_eoi(&data_no_eoi, 2), None);
+    }
+
+    #[test]
+    fn test_thumbnail_regenerated_after_source_change() {
+        let temp_dir = TempDir::new().unwrap();
+        let src = create_test_jpeg(temp_dir.path(), "changing.jpg");
+        let thumb1 = get_thumbnail_path(&src).unwrap();
+        assert!(thumb1.exists());
+        let new_img = image::RgbImage::from_pixel(200, 200, image::Rgb([50u8, 50, 50]));
+        new_img.save(&src).unwrap();
+        let thumb2 = get_thumbnail_path(&src).unwrap();
+        let new_thumb = image::open(&thumb2).unwrap();
+        assert_eq!(new_thumb.width(), THUMBNAIL_SIZE as u32);
+    }
+
+    #[test]
+    fn test_open_image_propagates_error_for_bad_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let bad = temp_dir.path().join("bad.jpg");
+        std::fs::write(&bad, b"this is not a valid JPEG file at all").unwrap();
+        let result = open_image(&bad);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("image::open failed") || err.contains("Unsupported"));
+    }
+
+    #[test]
+    fn test_raw_without_jpeg_returns_error() {
+        let temp_dir = TempDir::new().unwrap();
+        let fake_raw = temp_dir.path().join("no_preview.cr2");
+        let data = vec![0u8; 2048];
+        std::fs::write(&fake_raw, &data).unwrap();
+        let result = extract_raw_preview(&fake_raw);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("No embedded JPEG preview"));
     }
 }

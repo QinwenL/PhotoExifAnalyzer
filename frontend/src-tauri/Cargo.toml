@@ -26,6 +26,9 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 lazy_static = "1"
 chrono = "0.4"
 
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = ["Win32_Graphics_Imaging", "Win32_System_Com", "Win32_Foundation"] }
+
 [dev-dependencies]
 tempfile = "3"
 

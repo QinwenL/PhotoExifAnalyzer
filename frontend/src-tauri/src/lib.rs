@@ -195,10 +195,17 @@ fn get_thumbnail(path: String) -> Result<String, String> {
     Ok(thumb_path.to_string_lossy().to_string())
 }
 
+#[derive(serde::Deserialize)]
+struct ImageDataArgs {
+    path: String,
+    #[serde(rename = "maxSize")]
+    max_size: Option<u32>,
+}
+
 #[tauri::command]
-fn get_image_data(path: String, max_size: Option<u32>) -> Result<String, String> {
-    let path = Path::new(&path);
-    let size = max_size.unwrap_or(800);
+fn get_image_data(args: ImageDataArgs) -> Result<String, String> {
+    let path = Path::new(&args.path);
+    let size = args.max_size.unwrap_or(200);
     get_image_base64(path, size)
 }
 

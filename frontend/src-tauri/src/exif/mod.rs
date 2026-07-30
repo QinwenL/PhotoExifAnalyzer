@@ -1,4 +1,6 @@
 pub mod cache;
+#[cfg(target_os = "windows")]
+pub mod heic;
 pub mod file_ops;
 pub mod parser;
 pub mod scanner;
