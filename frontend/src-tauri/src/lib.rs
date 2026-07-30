@@ -18,7 +18,7 @@ lazy_static::lazy_static! {
     static ref SCAN_CANCELLED: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
     /// Global EXIF cache stored in the app's data directory.
     /// Initialized lazily on first scan; shared across all scan operations.
-    static ref EXIF_CACHE: Option<Arc<Mutex<ExifCache>>> = init_cache();
+    pub(crate) static ref EXIF_CACHE: Option<Arc<Mutex<ExifCache>>> = init_cache();
 }
 
 /// Initialize the EXIF cache in the user's app data directory.

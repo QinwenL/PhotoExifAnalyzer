@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::io::{Read, Seek, SeekFrom};
 
 const THUMBNAIL_SIZE: u32 = 150;
 /// Absolute ceiling for `max_size` accepted by any entrypoint in this
@@ -85,39 +86,26 @@ fn open_image(path: &Path) -> Result<image::DynamicImage, String> {
 }
 
 fn extract_raw_preview(path: &Path) -> Result<image::DynamicImage, String> {
-    let file_bytes = std::fs::read(path)
-        .map_err(|e| format!("Failed to read RAW file: {}", e))?;
+    // 优先查 EXIF 缓存中的 preview 偏移（scanner 在解析 EXIF 时已缓存），
+    // 命中则直接 seek + read，跳过全文件扫描。
+    let preview = if let Some(cache) = crate::EXIF_CACHE.as_ref() {
+        cache.lock().unwrap().get_preview(path, None)
+    } else {
+        None
+    };
 
-    let soi_positions = find_all_jpeg_soi(&file_bytes);
+    // 缓存未命中则扫描文件定位 preview
+    let preview = match preview {
+        Some(p) => p,
+        None => super::raw_scan::find_largest_jpeg_preview(path)?
+            .ok_or_else(|| {
+                "No embedded JPEG preview found in RAW file (no SOI markers). \
+                 Thumbnail generation for this RAW format is not yet supported."
+                    .to_string()
+            })?,
+    };
 
-    if soi_positions.is_empty() {
-        return Err(
-            "No embedded JPEG preview found in RAW file (no SOI markers). \
-             Thumbnail generation for this RAW format is not yet supported."
-                .to_string(),
-        );
-    }
-
-    let mut best_jpeg: Option<&[u8]> = None;
-    let mut best_size: usize = 0;
-
-    for &soi_pos in &soi_positions {
-        if let Some(eoi_pos) = find_jpeg_eoi(&file_bytes, soi_pos.saturating_add(2)) {
-            let jpeg_data = &file_bytes[soi_pos..=eoi_pos];
-            if jpeg_data.len() > best_size {
-                best_size = jpeg_data.len();
-                best_jpeg = Some(jpeg_data);
-            }
-        }
-    }
-
-    let jpeg_data = best_jpeg.ok_or_else(|| {
-        "No embedded JPEG preview found in RAW file (SOI without EOI). \
-         Thumbnail generation for this RAW format is not yet supported."
-            .to_string()
-    })?;
-
-    if jpeg_data.len() < 200 {
+    if preview.length < 200 {
         return Err(
             "Embedded JPEG preview is too small (< 200 bytes). \
              RAW file may not contain a usable preview."
@@ -125,23 +113,33 @@ fn extract_raw_preview(path: &Path) -> Result<image::DynamicImage, String> {
         );
     }
 
-    let img = image::load_from_memory_with_format(jpeg_data, image::ImageFormat::Jpeg)
+    // 只读 preview 字节，不读整个 RAW 文件
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| format!("Failed to open RAW file: {}", e))?;
+    file.seek(SeekFrom::Start(preview.offset))
+        .map_err(|e| format!("Failed to seek to preview offset: {}", e))?;
+    let mut jpeg_data = vec![0u8; preview.length];
+    file.read_exact(&mut jpeg_data)
+        .map_err(|e| format!("Failed to read preview bytes: {}", e))?;
+
+    let img = image::load_from_memory_with_format(&jpeg_data, image::ImageFormat::Jpeg)
         .or_else(|_| {
             let temp_path = std::env::temp_dir().join(format!(
                 "raw_preview_{}_{}.jpg",
                 std::process::id(),
-                best_size
+                preview.length
             ));
-            std::fs::write(&temp_path, jpeg_data)?;
+            std::fs::write(&temp_path, &jpeg_data)?;
             let result = image::open(&temp_path);
             let _ = std::fs::remove_file(&temp_path);
             result
         })
-        .map_err(|e| format!("Failed to decode RAW preview JPEG: {} (size: {} bytes)", e, best_size))?;
+        .map_err(|e| format!("Failed to decode RAW preview JPEG: {} (size: {} bytes)", e, preview.length))?;
 
     Ok(img)
 }
 
+#[allow(dead_code)]
 pub(crate) fn find_all_jpeg_soi(data: &[u8]) -> Vec<usize> {
     let mut positions = Vec::new();
     let mut search_pos = 0;
@@ -163,6 +161,7 @@ pub(crate) fn find_all_jpeg_soi(data: &[u8]) -> Vec<usize> {
     positions
 }
 
+#[allow(dead_code)]
 pub(crate) fn find_jpeg_eoi(data: &[u8], from_pos: usize) -> Option<usize> {
     if from_pos >= data.len().saturating_sub(1) {
         return None;

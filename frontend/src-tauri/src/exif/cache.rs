@@ -5,6 +5,7 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
 use super::ExifData;
+use super::raw_scan::JpegPreview;
 
 /// Cache version - increment when schema changes
 const CACHE_VERSION: i32 = 1;
@@ -53,13 +54,25 @@ impl ExifCache {
                     path TEXT PRIMARY KEY,
                     modified_time INTEGER NOT NULL,
                     exif_json TEXT NOT NULL,
-                    version INTEGER NOT NULL
+                    version INTEGER NOT NULL,
+                    preview_offset INTEGER,
+                    preview_length INTEGER
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_modified_time ON exif_cache(modified_time);
                 CREATE INDEX IF NOT EXISTS idx_version ON exif_cache(version);",
             )
             .map_err(|e| format!("Failed to create schema: {}", e))?;
+
+        // 迁移：为旧版（无 preview 列）的表添加新列。
+        // 如果列已存在，ALTER TABLE 会报 "duplicate column name"，
+        // 用 `let _ =` 忽略即可。
+        let _ = self
+            .conn
+            .execute("ALTER TABLE exif_cache ADD COLUMN preview_offset INTEGER", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE exif_cache ADD COLUMN preview_length INTEGER", []);
 
         Ok(())
     }
@@ -261,6 +274,75 @@ impl ExifCache {
 
         Ok(count)
     }
+
+    /// Get cached JPEG preview offset for a file.
+    ///
+    /// Returns `Some(JpegPreview)` if the cache contains a valid preview
+    /// offset for this file (path + mtime + version all match and
+    /// `preview_offset`/`preview_length` are non-NULL). Returns `None`
+    /// otherwise.
+    ///
+    /// Accepts an optional pre-computed `modified_time` to avoid a
+    /// redundant stat() syscall, matching the `get()` API.
+    pub fn get_preview(&self, path: &Path, modified_time: Option<u64>) -> Option<JpegPreview> {
+        let path_str = path.to_string_lossy().to_string();
+        let modified_time = modified_time.or_else(|| get_modified_time(path))?;
+
+        self.conn
+            .query_row(
+                "SELECT modified_time, preview_offset, preview_length, version \
+                 FROM exif_cache WHERE path = ?1",
+                params![path_str],
+                |row| {
+                    let row_mtime: u64 = row.get(0)?;
+                    let offset: Option<i64> = row.get(1)?;
+                    let length: Option<i64> = row.get(2)?;
+                    let row_version: i32 = row.get(3)?;
+
+                    if row_version != CACHE_VERSION || row_mtime != modified_time {
+                        return Ok(None);
+                    }
+
+                    match (offset, length) {
+                        (Some(o), Some(l)) if l > 0 => Ok(Some(JpegPreview {
+                            offset: o as u64,
+                            length: l as usize,
+                        })),
+                        _ => Ok(None),
+                    }
+                },
+            )
+            .ok()
+            .flatten()
+    }
+
+    /// Cache the JPEG preview offset for a file.
+    ///
+    /// Requires the row to already exist (created by `set()` or
+    /// `bulk_insert()`). Updates `preview_offset` and `preview_length`
+    /// in-place via `UPDATE`.
+    ///
+    /// Accepts an optional pre-computed `modified_time` to avoid a
+    /// redundant stat() syscall, matching the `set()` API.
+    pub fn set_preview(
+        &self,
+        path: &Path,
+        preview: &JpegPreview,
+        modified_time: Option<u64>,
+    ) -> Result<(), String> {
+        let path_str = path.to_string_lossy().to_string();
+        let _ = modified_time.or_else(|| get_modified_time(path));
+
+        self.conn
+            .execute(
+                "UPDATE exif_cache SET preview_offset = ?2, preview_length = ?3 \
+                 WHERE path = ?1",
+                params![path_str, preview.offset as i64, preview.length as i64],
+            )
+            .map_err(|e| format!("Failed to set preview offset: {}", e))?;
+
+        Ok(())
+    }
 }
 
 /// Cache statistics
@@ -435,5 +517,78 @@ mod tests {
         let cache = ExifCache::new(temp_dir.path()).unwrap();
         cache.bulk_insert(&[]).expect("empty bulk insert must not fail");
         assert_eq!(cache.stats().total_entries, 0);
+    }
+
+    // ---- preview offset 缓存测试 ----
+
+    #[test]
+    fn test_cache_set_and_get_preview() {
+        let temp_dir = TempDir::new().unwrap();
+        let cache = ExifCache::new(temp_dir.path()).unwrap();
+
+        let path = create_test_file(temp_dir.path(), "test.cr2");
+        let exif = create_test_exif("Canon", "EOS R5");
+
+        // 先写入 EXIF（创建行）
+        cache.set(&path, &exif, None).unwrap();
+
+        // 写入 preview 偏移
+        let preview = JpegPreview {
+            offset: 1024,
+            length: 500,
+        };
+        cache.set_preview(&path, &preview, None).unwrap();
+
+        // 读取 preview 偏移
+        let cached = cache.get_preview(&path, None).unwrap();
+        assert_eq!(cached.offset, 1024);
+        assert_eq!(cached.length, 500);
+    }
+
+    #[test]
+    fn test_cache_get_preview_returns_none_when_not_set() {
+        let temp_dir = TempDir::new().unwrap();
+        let cache = ExifCache::new(temp_dir.path()).unwrap();
+
+        let path = create_test_file(temp_dir.path(), "test.cr2");
+        let exif = create_test_exif("Canon", "EOS R5");
+        cache.set(&path, &exif, None).unwrap();
+
+        // 没有写入 preview 偏移
+        let result = cache.get_preview(&path, None);
+        assert!(result.is_none(), "get_preview must return None when no preview is cached");
+    }
+
+    #[test]
+    fn test_cache_get_preview_invalidated_on_modify() {
+        let temp_dir = TempDir::new().unwrap();
+        let cache = ExifCache::new(temp_dir.path()).unwrap();
+
+        let path = create_test_file(temp_dir.path(), "test.cr2");
+        let exif = create_test_exif("Canon", "EOS R5");
+        cache.set(&path, &exif, None).unwrap();
+
+        let preview = JpegPreview {
+            offset: 1024,
+            length: 500,
+        };
+        cache.set_preview(&path, &preview, None).unwrap();
+
+        // 等待 mtime 变化
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(&path, b"modified").unwrap();
+
+        // 文件修改后 preview 偏移应失效
+        let result = cache.get_preview(&path, None);
+        assert!(result.is_none(), "preview must be invalidated on file modify");
+    }
+
+    #[test]
+    fn test_cache_get_preview_returns_none_for_nonexistent_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let cache = ExifCache::new(temp_dir.path()).unwrap();
+
+        let result = cache.get_preview(Path::new("/nonexistent/photo.cr2"), None);
+        assert!(result.is_none());
     }
 }

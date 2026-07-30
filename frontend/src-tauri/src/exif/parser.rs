@@ -1,10 +1,11 @@
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use exif::{In, Tag};
 
-use super::thumbnail::{find_all_jpeg_soi, find_jpeg_eoi, is_raw_extension};
+use super::raw_scan::find_largest_jpeg_preview;
+use super::thumbnail::is_raw_extension;
 use super::ExifData;
 
 /// Minimum embedded JPEG preview size to be considered usable for EXIF
@@ -26,6 +27,19 @@ const CR3_CMT1_UUID: [u8; 16] = [
 
 /// Parse EXIF data from an image file
 pub fn parse_exif<P: AsRef<Path>>(path: P) -> Result<ExifData, String> {
+    parse_exif_with_preview(path).map(|(exif, _)| exif)
+}
+
+/// Parse EXIF data from an image file, also returning the JPEG preview
+/// offset for RAW files (if found).
+///
+/// For RAW files (CR2/NEF/ARW/DNG/...), the preview offset is cached
+/// alongside the EXIF data so the thumbnail path can `seek + read` directly
+/// without re-scanning the file. For non-RAW files (JPEG/PNG/...), the
+/// preview offset is always `None`.
+pub fn parse_exif_with_preview<P: AsRef<Path>>(
+    path: P,
+) -> Result<(ExifData, Option<super::raw_scan::JpegPreview>), String> {
     let path = path.as_ref();
 
     if !path.exists() {
@@ -39,7 +53,7 @@ pub fn parse_exif<P: AsRef<Path>>(path: P) -> Result<ExifData, String> {
     if is_cr3_extension(path) {
         if let Ok(data) = parse_cr3_exif_via_bmff(path) {
             if !data.is_empty() {
-                return Ok(data);
+                return Ok((data, None));
             }
         }
     }
@@ -60,7 +74,7 @@ pub fn parse_exif<P: AsRef<Path>>(path: P) -> Result<ExifData, String> {
         .read_from_container(&mut bufreader)
         .map_err(|e| format!("Failed to read EXIF: {}", e))?;
 
-    Ok(exif_to_data(&exif))
+    Ok((exif_to_data(&exif), None))
 }
 
 fn is_cr3_extension(path: &Path) -> bool {
@@ -243,57 +257,42 @@ fn read_boxes_in_range(data: &[u8], start: usize, end: usize) -> Option<Vec<Bmff
 /// and reading EXIF from that JPEG via kamadak-exif.
 ///
 /// Most camera RAW formats (CR2/NEF/ARW/DNG/...) embed a full-resolution
-/// JPEG preview containing the complete shooting EXIF. This reuses the
-/// SOI/EOI scanning logic shared with `thumbnail::extract_raw_preview` so
-/// the same preview selection strategy applies to both paths.
-fn parse_raw_exif(path: &Path) -> Result<ExifData, String> {
-    let file_bytes =
-        std::fs::read(path).map_err(|e| format!("Failed to read RAW file: {}", e))?;
-
-    let soi_positions = find_all_jpeg_soi(&file_bytes);
-    if soi_positions.is_empty() {
-        return Err(
+/// JPEG preview containing the complete shooting EXIF. Uses
+/// `raw_scan::find_largest_jpeg_preview` (memmap2 + memchr SIMD) to locate
+/// the preview offset, then `seek + read_exact` to read only the preview
+/// bytes — avoiding reading the entire RAW file into memory.
+///
+/// Returns both the parsed EXIF data and the preview offset (for caching
+/// by the caller, so the thumbnail path can skip re-scanning).
+fn parse_raw_exif(path: &Path) -> Result<(ExifData, Option<super::raw_scan::JpegPreview>), String> {
+    let preview = find_largest_jpeg_preview(path)?
+        .ok_or_else(|| {
             "No embedded JPEG preview found in RAW file; EXIF extraction not supported"
-                .to_string(),
-        );
-    }
+                .to_string()
+        })?;
 
-    // Pick the largest complete JPEG segment — it is the most likely to
-    // carry a full EXIF APP1 segment (smaller SOIs are often thumbnail
-    // strips or spurious markers).
-    let mut best_jpeg: Option<&[u8]> = None;
-    let mut best_size: usize = 0;
-    for &soi_pos in &soi_positions {
-        if let Some(eoi_pos) = find_jpeg_eoi(&file_bytes, soi_pos.saturating_add(2)) {
-            let jpeg = &file_bytes[soi_pos..=eoi_pos];
-            if jpeg.len() > best_size {
-                best_size = jpeg.len();
-                best_jpeg = Some(jpeg);
-            }
-        }
-    }
-
-    let jpeg = best_jpeg.ok_or_else(|| {
-        "No embedded JPEG preview found in RAW file (SOI without matching EOI); \
-         EXIF extraction not supported"
-            .to_string()
-    })?;
-
-    if jpeg.len() < MIN_RAW_PREVIEW_BYTES {
+    if preview.length < MIN_RAW_PREVIEW_BYTES {
         return Err(format!(
             "Embedded JPEG preview too small ({} bytes < {}); RAW EXIF extraction not supported",
-            jpeg.len(),
-            MIN_RAW_PREVIEW_BYTES
+            preview.length, MIN_RAW_PREVIEW_BYTES
         ));
     }
 
-    let cursor = std::io::Cursor::new(jpeg);
+    // 只读 preview 字节，不读整个 RAW 文件
+    let mut file = File::open(path).map_err(|e| format!("Failed to open RAW file: {}", e))?;
+    file.seek(SeekFrom::Start(preview.offset))
+        .map_err(|e| format!("Failed to seek to preview offset: {}", e))?;
+    let mut jpeg_bytes = vec![0u8; preview.length];
+    file.read_exact(&mut jpeg_bytes)
+        .map_err(|e| format!("Failed to read preview bytes: {}", e))?;
+
+    let cursor = std::io::Cursor::new(jpeg_bytes);
     let mut bufreader = BufReader::new(cursor);
     let exif = exif::Reader::new()
         .read_from_container(&mut bufreader)
         .map_err(|e| format!("Failed to read EXIF from RAW preview: {}", e))?;
 
-    Ok(exif_to_data(&exif))
+    Ok((exif_to_data(&exif), Some(preview)))
 }
 
 /// Convert exif::Exif to our ExifData struct
@@ -693,7 +692,7 @@ mod tests {
         // Append a small embedded JPEG (no EXIF) — parse_raw_exif will try
         // to read EXIF from it and fail.
         let small_jpeg = vec![0xFF, 0xD8]; // SOI
-        let padded = std::iter::repeat(0u8).take(300).collect::<Vec<_>>();
+        let padded = std::iter::repeat_n(0u8, 300).collect::<Vec<_>>();
         let mut jpeg = small_jpeg;
         jpeg.extend(padded);
         jpeg.push(0xFF);

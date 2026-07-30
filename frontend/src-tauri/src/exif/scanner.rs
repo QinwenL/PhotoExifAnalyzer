@@ -7,7 +7,7 @@ use walkdir::WalkDir;
 
 use super::ExifData;
 use super::cache::ExifCache;
-use super::parser::parse_exif;
+use super::parser::parse_exif_with_preview;
 
 /// Maximum number of concurrent I/O threads to avoid disk contention.
 /// HDDs benefit from low concurrency (2-4); SSDs can handle more.
@@ -246,10 +246,15 @@ fn process_image_with_cache(
     }
 
     // 2. Cache miss — parse EXIF from disk
-    let (exif, error) = match parse_exif(path) {
-        Ok(exif) => (exif, None),
-        Err(e) => (ExifData::new(), Some(e)),
+    let (exif, preview, error) = match parse_exif_with_preview(path) {
+        Ok((exif, preview)) => (exif, preview, None),
+        Err(e) => (ExifData::new(), None, Some(e)),
     };
+
+    // 2b. 如果解析成功且拿到了 preview 偏移，立即缓存（缩略图路径可跳过扫描）
+    if let (Some(preview), Some(cache), Some(mtime)) = (&preview, cache, modified_time) {
+        let _ = cache.lock().unwrap().set_preview(path, preview, Some(mtime));
+    }
 
     // 3. Successful parse: pre-serialize outside the cache Mutex and return
     //    to caller for bulk-insert. We only produce the pending-write tuple

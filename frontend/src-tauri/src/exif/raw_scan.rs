@@ -185,7 +185,7 @@ mod tests {
     /// 构造一个最小但结构合法的 JPEG（SOI + 少量数据 + EOI）。
     fn minimal_jpeg(body_len: usize) -> Vec<u8> {
         let mut jpeg = vec![0xFF, 0xD8]; // SOI
-        jpeg.extend(std::iter::repeat(0xAAu8).take(body_len));
+        jpeg.extend(std::iter::repeat_n(0xAAu8, body_len));
         jpeg.push(0xFF);
         jpeg.push(0xD9); // EOI
         jpeg
